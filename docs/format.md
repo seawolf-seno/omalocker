@@ -24,7 +24,7 @@ A Locker is a folder (`~/Locker`) of Markdown notes with YAML frontmatter (Obsid
 
 | type | properties |
 |---|---|
-| `class` | `course`, `teacher` (link), `block`, `day` (A/B), `room`, `term`, `ideas` (links), `source` |
+| `class` | `course`, `teacher` (link), `block`, `day` (A/B), `room`, `term`, `ideas` (links), `source`, `omamastery` (the class's folder id, set by import) |
 | `person` | `role` (student/teacher/staff/mentor/family), `grad_year`, `classes`, `activities`; teacher notes about students get `share: [private]` |
 | `activity` | `kind`, `leader` (link), `season`, `ideas` |
 | `idea` | `joint` (link to its joint note), `classes` |
@@ -42,7 +42,10 @@ Any note may add `share`, always a list: `[private]` (owner only), or extra audi
 (`parent`, `teacher`, `advisor`, `activity`) on top of the defaults in `docs/plan.md`.
 `private` can't be combined with other audiences.
 
-`source` marks notes an app created. Apps rewrite only their own block:
+`source` marks notes an app created. Apps rewrite only their own block, plus the
+properties they own (for `omalocker import classes`: a class note's `course`, `block`,
+`day`, `room`, `term`, `ideas`; an idea's `joint`; the import's own links in `classes`).
+Other properties and everything outside the block stay as the person wrote them:
 
 ```
 <!-- omalocker:omamastery -->

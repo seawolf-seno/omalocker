@@ -1,0 +1,663 @@
+#!/usr/bin/env python3
+"""omalocker: set up a Locker, bring in OmaMastery classes, check the notes.
+
+Python stdlib only. See docs/format.md for the note format.
+
+  omalocker init [--role ROLE] [--move-classes]
+  omalocker import classes
+  omalocker doctor [--show-names] [--json]
+
+Never opens roster.toml, mastery.csv or notes.md in a class folder: they hold
+real students' names and the teacher's notes about them.
+"""
+
+import argparse
+import datetime
+import json
+import os
+import re
+import shutil
+import sys
+import tomllib
+from pathlib import Path
+
+VERSION = "0.1.0"
+
+TYPES = {
+    "class", "person", "activity", "idea", "joint", "journal", "work",
+    "milestone", "pathway", "mastery", "home", "inbox", "guide",
+}
+AUDIENCES = {"private", "parent", "teacher", "advisor", "activity"}
+ROLES = {"student", "teacher", "staff", "mentor", "family"}
+WORK_STATUS = {"idea", "draft", "turned-in", "returned"}
+
+# The only files read from a class folder. Everything else there is off limits.
+CLASS_FILES = ("class.toml", "ideas.toml", "plan.toml")
+SOURCE = "omamastery"
+
+BLOCK_RE = re.compile(r"<!-- (/?)omalocker:([\w-]+) -->")
+LINK_RE = re.compile(r"!?\[\[([^\]|#^]*)(?:[#^][^\]|]*)?(?:\|[^\]]*)?\]\]")
+FENCE_RE = re.compile(r"^```.*?^```", re.S | re.M)
+CODE_RE = re.compile(r"`[^`\n]*`")
+UNSAFE_NAME = re.compile(r'[\\/:*?"<>|#^\[\]]')
+
+
+class FormatError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------- frontmatter
+#
+# A small YAML subset: what Obsidian writes for properties. Scalars, quoted
+# strings, inline lists ([a, "b"]) and block lists ("  - item").
+
+def _unquote(value, lineno):
+    value = value.strip()
+    if not value:
+        return None
+    if value[0] == '"':
+        if len(value) < 2 or value[-1] != '"':
+            raise FormatError(f"line {lineno}: unclosed quote")
+        return re.sub(r'\\(.)', r'\1', value[1:-1])
+    if value[0] == "'":
+        if len(value) < 2 or value[-1] != "'":
+            raise FormatError(f"line {lineno}: unclosed quote")
+        return value[1:-1].replace("''", "'")
+    if value.startswith("[["):
+        raise FormatError(f"line {lineno}: a [[link]] in a property needs quotes")
+    if value[0] in "{&*!|>%@`":
+        raise FormatError(f"line {lineno}: unsupported YAML ({value[:20]})")
+    return value.split(" #")[0].rstrip()
+
+
+def _split_inline(inner, lineno):
+    items, cur, quote = [], "", None
+    for ch in inner:
+        if quote:
+            cur += ch
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+            cur += ch
+        elif ch == ",":
+            items.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    if quote:
+        raise FormatError(f"line {lineno}: unclosed quote")
+    if cur.strip():
+        items.append(cur)
+    return [_unquote(i, lineno) for i in items if i.strip()]
+
+
+def split_note(text):
+    """Return (frontmatter lines or None, body)."""
+    if not text.startswith("---\n"):
+        return None, text
+    end = text.find("\n---", 3)
+    while end != -1 and text[end + 4:end + 5] not in ("\n", ""):
+        end = text.find("\n---", end + 1)
+    if end == -1:
+        raise FormatError("frontmatter has no closing ---")
+    body = text[end + 4:]
+    if body.startswith("\n"):
+        body = body[1:]
+    return text[4:end + 1].splitlines(), body
+
+
+def parse_props(lines):
+    props, key = {}, None
+    for n, line in enumerate(lines, start=2):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        m = re.match(r"^\s*-\s*(.*)$", line)
+        if m and key is not None and line[0] in " -":
+            if props[key] is None:
+                props[key] = []
+            if not isinstance(props[key], list):
+                raise FormatError(f"line {n}: list item under a non-list property")
+            props[key].append(_unquote(m.group(1), n))
+            continue
+        m = re.match(r"^([A-Za-z_][\w-]*):(?:\s+(.*))?$", line)
+        if not m:
+            raise FormatError(f"line {n}: not a property")
+        key, raw = m.group(1), (m.group(2) or "").strip()
+        if key in props:
+            raise FormatError(f"line {n}: {key} appears twice")
+        if raw.startswith("[") and not raw.startswith("[["):
+            if not raw.endswith("]"):
+                raise FormatError(f"line {n}: unclosed list")
+            props[key] = _split_inline(raw[1:-1], n)
+        else:
+            props[key] = _unquote(raw, n)
+    return props
+
+
+def _scalar(value):
+    s = str(value)
+    plain = re.fullmatch(r"[\w./()+-][\w ./()+&,'-]*", s) and not s.endswith(" ")
+    if plain and s.lower() not in ("true", "false", "null", "yes", "no", "on", "off"):
+        return s
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def dump_props(props):
+    out = ["---"]
+    for k, v in props.items():
+        if isinstance(v, list):
+            if not v:
+                out.append(f"{k}: []")
+            else:
+                out.append(f"{k}:")
+                out.extend(f"  - {_scalar(i)}" for i in v)
+        elif v is None or v == "":
+            out.append(f"{k}:")
+        else:
+            out.append(f"{k}: {_scalar(v)}")
+    out.append("---")
+    return "\n".join(out) + "\n"
+
+
+def read_note(path):
+    text = path.read_text(encoding="utf-8")
+    lines, body = split_note(text)
+    return (parse_props(lines) if lines is not None else None), body
+
+
+def link(name):
+    return f"[[{name}]]"
+
+
+def link_target(value):
+    m = LINK_RE.fullmatch(str(value).strip()) if value else None
+    return m.group(1).strip() if m else None
+
+
+def note_name(name):
+    name = re.sub(r"\s*:\s+", " - ", name)
+    return UNSAFE_NAME.sub("-", name).strip().strip(".") or "Untitled"
+
+
+def write_if_changed(path, text):
+    """Write atomically. Return 'created', 'updated' or None."""
+    old = path.read_text(encoding="utf-8") if path.exists() else None
+    if old == text:
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.omalocker-tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+    return "created" if old is None else "updated"
+
+
+def set_block(body, source, content):
+    start, end = f"<!-- omalocker:{source} -->", f"<!-- /omalocker:{source} -->"
+    block = f"{start}\n{content.strip()}\n{end}"
+    pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.S)
+    if pattern.search(body):
+        return pattern.sub(lambda _: block, body, count=1)
+    return body.rstrip("\n") + ("\n\n" if body.strip() else "") + block + "\n"
+
+
+# ---------------------------------------------------------------- paths
+
+def home():
+    return Path(os.environ.get("HOME", Path.home()))
+
+
+def default_locker():
+    return Path(os.environ.get("OMALOCKER_LOCKER", home() / "Locker"))
+
+
+def template_dir():
+    here = Path(__file__).resolve().parent
+    for candidate in (
+        os.environ.get("OMALOCKER_TEMPLATE"),
+        here.parent / "template",
+        "/usr/share/omalocker/template",
+    ):
+        if candidate and Path(candidate, "Home.md").exists():
+            return Path(candidate)
+    sys.exit("omalocker: can't find the Locker template (set OMALOCKER_TEMPLATE)")
+
+
+# ---------------------------------------------------------------- init
+
+def cmd_init(args):
+    locker = Path(args.locker or default_locker()).expanduser()
+    template = template_dir()
+    created = []
+    for src in sorted(template.rglob("*")):
+        rel = src.relative_to(template)
+        dest = locker / rel
+        if src.is_dir():
+            dest.mkdir(parents=True, exist_ok=True)
+            continue
+        if src.name == ".gitkeep" or dest.exists():
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        text = src.read_text(encoding="utf-8")
+        if rel == Path("Me.md") and args.role:
+            text = re.sub(r"(?m)^role:.*$", f"role: {args.role}", text, count=1)
+        dest.write_text(text, encoding="utf-8")
+        created.append(str(rel))
+    print(f"Locker: {locker}")
+    print(f"  {len(created)} notes created" if created else "  already set up; nothing overwritten")
+    if args.move_classes:
+        return move_classes(locker)
+    return 0
+
+
+def move_classes(locker):
+    classes, target = home() / "Classes", locker / "Classes"
+    if classes.is_symlink():
+        where = classes.resolve()
+        if where == target.resolve():
+            print("  ~/Classes already points into the Locker")
+            return 0
+        print(f"omalocker: ~/Classes is a link to {where}; leaving it alone", file=sys.stderr)
+        return 1
+    if not classes.is_dir():
+        print("  no ~/Classes to move")
+        return 0
+    entries = sorted(classes.iterdir())
+    clash = [e.name for e in entries if (target / e.name).exists()]
+    if clash:
+        print(f"omalocker: Locker/Classes already has {', '.join(clash)}; nothing moved",
+              file=sys.stderr)
+        return 1
+    target.mkdir(parents=True, exist_ok=True)
+    for entry in entries:
+        shutil.move(str(entry), str(target / entry.name))
+    classes.rmdir()
+    classes.symlink_to(target, target_is_directory=True)
+    print(f"  moved {len(entries)} items from ~/Classes into {target}; ~/Classes now links there")
+    return 0
+
+
+# ---------------------------------------------------------------- import classes
+
+def school_term(classes_dir):
+    try:
+        with open(classes_dir / "schedule.toml", "rb") as f:
+            first = str(tomllib.load(f).get("first_day", ""))
+        year = int(first[:4])
+    except (OSError, ValueError, tomllib.TOMLDecodeError):
+        today = datetime.date.today()
+        year = today.year if today.month >= 7 else today.year - 1
+    return f"{year}-{str(year + 1)[-2:]}"
+
+
+def load_toml(path):
+    if not path.exists():
+        return {}
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
+def read_classes(classes_dir):
+    """Each class folder's class.toml, ideas.toml and plan.toml. Nothing else."""
+    found = []
+    for folder in sorted(classes_dir.iterdir()):
+        if not folder.is_dir() or folder.name.startswith(".") or folder.name == "archive":
+            continue
+        if not (folder / "class.toml").exists():
+            continue
+        try:
+            meta, ideas, plan = (load_toml(folder / name) for name in CLASS_FILES)
+        except tomllib.TOMLDecodeError as e:
+            print(f"  skipped {folder.name}: {e}", file=sys.stderr)
+            continue
+        found.append({
+            "id": folder.name,
+            "name": str(meta.get("name") or folder.name),
+            "day": meta.get("day") or None,
+            "block": meta.get("block"),
+            "room": meta.get("room") or None,
+            "sample": bool(meta.get("sample")),
+            "ideas": [i for i in ideas.get("idea", []) if i.get("name")],
+            "objectives": plan.get("objective", []),
+        })
+    return found
+
+
+def existing_notes(folder):
+    """{note name: (path, props)} for parseable notes directly in folder."""
+    notes = {}
+    if folder.is_dir():
+        for path in sorted(folder.glob("*.md")):
+            try:
+                props, _ = read_note(path)
+            except (FormatError, UnicodeDecodeError):
+                props = None
+            notes[path.stem] = (path, props)
+    return notes
+
+
+def upsert(path, owned, block, title, tail=""):
+    """Create a note, or update only the properties and block import owns."""
+    if path.exists():
+        try:
+            props, body = read_note(path)
+        except (FormatError, UnicodeDecodeError) as e:
+            print(f"  skipped {path.name}: frontmatter can't be read ({e})", file=sys.stderr)
+            return "skipped"
+        props = props or {}
+        if props.get("type") not in (None, owned["type"]):
+            print(f"  skipped {path.name}: it's a {props.get('type')} note, not {owned['type']}",
+                  file=sys.stderr)
+            return "skipped"
+        if props.get("source") not in (None, SOURCE) and "source" in owned:
+            owned = {k: v for k, v in owned.items() if k != "source"}
+    else:
+        props, body = {}, f"# {title}\n"
+    props.update(owned)
+    body = set_block(body, SOURCE, block)
+    if not path.exists() and tail:
+        body += tail
+    return write_if_changed(path, dump_props(props) + body)
+
+
+def cmd_import(args):
+    locker = Path(args.locker or default_locker()).expanduser()
+    classes_dir = Path(args.classes or home() / "Classes").expanduser()
+    if not (locker / "Home.md").exists():
+        print(f"omalocker: no Locker at {locker}; run `omalocker init` first", file=sys.stderr)
+        return 1
+    if not classes_dir.is_dir():
+        print(f"omalocker: no classes folder at {classes_dir}", file=sys.stderr)
+        return 1
+    classes = read_classes(classes_dir)
+    term = school_term(classes_dir)
+    notes_dir, ideas_dir = locker / "Classes", locker / "Ideas"
+    counts = {"created": 0, "updated": 0, "skipped": 0}
+
+    def tally(result):
+        if result:
+            counts[result] += 1
+
+    # Class notes: found by their omamastery id first, so a renamed note stays put.
+    by_id = {props.get(SOURCE): name for name, (_, props) in existing_notes(notes_dir).items()
+             if props and props.get("type") == "class" and props.get(SOURCE)}
+    managed_classes = set(by_id.values())
+    idea_info, joint_ideas, idea_classes = {}, {}, {}
+    for c in classes:
+        name = by_id.get(c["id"]) or note_name(c["name"])
+        c["note"] = name
+        managed_classes.add(name)
+        idea_names = []
+        for idea in c["ideas"]:
+            iname = note_name(idea["name"])
+            idea_names.append(iname)
+            idea_info.setdefault(iname, idea)
+            idea_classes.setdefault(iname, []).append(name)
+            if idea.get("joint"):
+                joint_ideas.setdefault(note_name(idea["joint"]), set()).add(iname)
+        owned = {"type": "class", "course": c["name"], "block": c["block"], "day": c["day"],
+                 "room": c["room"], "term": term, "ideas": [link(i) for i in idea_names],
+                 "source": SOURCE, SOURCE: c["id"]}
+        owned = {k: v for k, v in owned.items() if v is not None or k in ("room",)}
+        lines = []
+        if c["sample"]:
+            lines.append("Sample class: made-up students.\n")
+        lines.append("Core ideas: " + (", ".join(link(i) for i in idea_names) + "."
+                                       if idea_names else "none yet."))
+        if c["objectives"]:
+            lines.append("\n## Objectives\n")
+            for o in sorted(c["objectives"], key=lambda o: str(o.get("week", ""))):
+                idea = f" ({link(note_name(o['idea']))})" if o.get("idea") else ""
+                week = f"Week of {o['week']}: " if o.get("week") else ""
+                lines.append(f"- {week}{o.get('title', o.get('id', ''))}{idea}")
+        tally(upsert(notes_dir / f"{name}.md", owned, "\n".join(lines), c["name"],
+                     tail="\n## My notes\n"))
+
+    def merged_classes(path, current):
+        keep = []
+        if path.exists():
+            try:
+                props, _ = read_note(path)
+                keep = [v for v in (props or {}).get("classes") or []
+                        if link_target(v) not in managed_classes]
+            except (FormatError, UnicodeDecodeError):
+                pass
+        return keep + [link(n) for n in dict.fromkeys(current)]
+
+    for iname, idea in idea_info.items():
+        path = ideas_dir / f"{iname}.md"
+        owned = {"type": "idea"}
+        joint = note_name(idea["joint"]) if idea.get("joint") else None
+        if joint:
+            owned["joint"] = link(joint)
+        owned["classes"] = merged_classes(path, idea_classes[iname])
+        owned["source"] = SOURCE
+        text = (idea.get("description") or "").strip()
+        if joint:
+            text += f"\n\nJoint: {link(joint)}."
+        tally(upsert(path, owned, text or "From OmaMastery.", idea["name"]))
+
+    for jname, inames in joint_ideas.items():
+        path = ideas_dir / f"{jname}.md"
+        current = [c for i in sorted(inames) for c in idea_classes[i]]
+        owned = {"type": "joint", "classes": merged_classes(path, current), "source": SOURCE}
+        block = "A joint: a big idea shared across subjects.\n\n" + "\n".join(
+            f"- {link(i)}" for i in sorted(inames))
+        tally(upsert(path, owned, block, jname))
+
+    print(f"Imported {len(classes)} classes from {classes_dir} into {locker}")
+    print(f"  {counts['created']} notes created, {counts['updated']} updated"
+          + (f", {counts['skipped']} skipped" if counts["skipped"] else ""))
+    return 1 if counts["skipped"] else 0
+
+
+# ---------------------------------------------------------------- doctor
+
+def is_class_folder(path):
+    return (path / "class.toml").exists() or path.name == "archive"
+
+
+def locker_files(locker):
+    """(notes to check, every file name for link resolution)."""
+    notes, everything = [], []
+    for root, dirs, files in os.walk(locker):
+        root = Path(root)
+        rel_root = root.relative_to(locker)
+        in_classes = rel_root.parts[:1] == ("Classes",)
+        skip_here = in_classes and len(rel_root.parts) > 1
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        for f in sorted(files):
+            if f.startswith(".") and f.endswith(".omalocker-tmp"):
+                continue
+            rel = rel_root / f
+            everything.append(rel)
+            if not f.endswith(".md") or f.startswith("."):
+                continue
+            if skip_here and is_class_folder(locker / Path(*rel_root.parts[:2])):
+                continue  # OmaMastery's own files: never opened
+            if in_classes and len(rel_root.parts) == 1 and f in ("AGENTS.md", "CLAUDE.md"):
+                continue  # OmaMastery's agent guide
+            notes.append(rel)
+    return notes, everything
+
+
+def link_index(files):
+    stems, paths = set(), set()
+    for rel in files:
+        p = rel.as_posix().lower()
+        if p.endswith(".md"):
+            stems.add(rel.stem.lower())
+            paths.add(p[:-3])
+        else:
+            stems.add(rel.name.lower())
+            paths.add(p)
+    return stems, paths
+
+
+def resolves(target, index):
+    stems, paths = index
+    t = target.strip().lower().lstrip("/")
+    if t.endswith(".md"):
+        t = t[:-3]
+    if not t:
+        return True  # [[#heading]] in the same note
+    return t in stems or t in paths or any(p.endswith("/" + t) for p in paths)
+
+
+def check_note(rel, text, index):
+    problems, broken = [], []
+    try:
+        lines, body = split_note(text)
+        if lines is None:
+            return ["no frontmatter (needs at least a type)"], [], {}
+        props = parse_props(lines)
+    except FormatError as e:
+        return [f"frontmatter: {e}"], [], {}
+    kind = props.get("type")
+    folder = rel.parts[0] if len(rel.parts) > 1 else ""
+    if not kind:
+        problems.append("no type")
+    elif kind not in TYPES:
+        problems.append(f"unknown type {kind!r}")
+
+    share = props.get("share")
+    if "share" in props:
+        if not isinstance(share, list):
+            problems.append("share must be a list, like [private] or [parent, teacher]")
+        else:
+            bad = [s for s in share if s not in AUDIENCES]
+            if bad:
+                problems.append(f"share has unknown audience {', '.join(map(str, bad))}")
+            if "private" in share and len(share) > 1:
+                problems.append("share: private can't be combined with other audiences")
+    if "private" in props:
+        problems.append("private: true is replaced by share: [private]")
+
+    if kind == "journal" and not (folder == "Journal"
+                                  and re.fullmatch(r"\d{4}-\d{2}-\d{2}", rel.stem)):
+        problems.append("journal notes go in Journal/ as YYYY-MM-DD.md")
+    if kind == "milestone" and not (rel.parent.as_posix() == "Pathway/Milestones"
+                                    and re.match(r"\d{4}-\d{2}-\d{2} ", rel.name)):
+        problems.append("milestones go in Pathway/Milestones/ as YYYY-MM-DD <name>.md")
+    if kind == "mastery" and folder != "Mastery":
+        problems.append("mastery notes go in Mastery/")
+    if kind == "home" and rel != Path("Home.md"):
+        problems.append("type home is only for Home.md")
+    if kind == "guide" and rel.name != "AGENTS.md":
+        problems.append("type guide is only for AGENTS.md")
+    if kind == "person" and props.get("role") and props["role"] not in ROLES:
+        problems.append(f"role {props['role']!r} isn't one of {', '.join(sorted(ROLES))}")
+    if kind == "work" and props.get("status") and props["status"] not in WORK_STATUS:
+        problems.append(f"status {props['status']!r} isn't one of {', '.join(sorted(WORK_STATUS))}")
+    if kind == "class" and props.get("day") and props["day"] not in ("A", "B"):
+        problems.append("day must be A or B")
+
+    open_block = None
+    for m in BLOCK_RE.finditer(body):
+        closing, name = m.group(1) == "/", m.group(2)
+        if not closing:
+            if open_block:
+                problems.append(f"omalocker:{name} block starts inside omalocker:{open_block}")
+            open_block = name
+        elif open_block != name:
+            problems.append(f"/omalocker:{name} closes a block that isn't open")
+        else:
+            open_block = None
+    if open_block:
+        problems.append(f"omalocker:{open_block} block is never closed")
+
+    values = []
+    for v in props.values():
+        values.extend(v if isinstance(v, list) else [v])
+    prose = CODE_RE.sub("", FENCE_RE.sub("", body))
+    targets = [t for t in (link_target(v) for v in values if v) if t is not None]
+    targets += [m.group(1) for m in LINK_RE.finditer(prose)]
+    for t in targets:
+        if not resolves(t, index):
+            broken.append(t)
+    return problems, broken, props
+
+
+def cmd_doctor(args):
+    locker = Path(args.locker or default_locker()).expanduser()
+    if not locker.is_dir():
+        print(f"omalocker: no Locker at {locker}", file=sys.stderr)
+        return 1
+    notes, everything = locker_files(locker)
+    index = link_index(everything)
+    report, hidden = [], 0
+    for rel in notes:
+        try:
+            text = (locker / rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            report.append({"note": str(rel), "problems": [f"can't read: {e.__class__.__name__}"],
+                           "broken_links": []})
+            continue
+        problems, broken, props = check_note(rel, text, index)
+        if not problems and not broken:
+            continue
+        sensitive = rel.parts[0] == "People" or "private" in (props.get("share") or [])
+        label = str(rel)
+        if sensitive and not args.show_names:
+            hidden += 1
+            label = f"{rel.parts[0]}/(a note: names hidden)"
+        entry = {"note": label, "problems": problems,
+                 "broken_links": broken if args.show_names else len(broken)}
+        report.append(entry)
+
+    if args.json:
+        print(json.dumps({"locker": str(locker), "notes": len(notes), "issues": report},
+                         indent=2))
+        return 1 if report else 0
+    print(f"Checked {len(notes)} notes in {locker}")
+    if not report:
+        print("  all good: every note has a type, valid frontmatter, and links that resolve")
+        return 0
+    for entry in report:
+        print(f"\n  {entry['note']}")
+        for p in entry["problems"]:
+            print(f"    - {p}")
+        b = entry["broken_links"]
+        if isinstance(b, list):
+            for t in b:
+                print(f"    - link to [[{t}]] doesn't resolve")
+        elif b:
+            print(f"    - {b} link{'s' if b > 1 else ''} don't resolve")
+    if not args.show_names:
+        print("\n  Link targets and People/ notes are hidden because they can be names."
+              "\n  `omalocker doctor --show-names` shows them; don't paste that output anywhere.")
+    print(f"\n  {len(report)} note{'s' if len(report) > 1 else ''} to fix")
+    return 1
+
+
+# ---------------------------------------------------------------- main
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="omalocker", description=__doc__.split("\n")[0])
+    parser.add_argument("--version", action="version", version=f"omalocker {VERSION}")
+    parser.add_argument("--locker", help="Locker folder (default ~/Locker)")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("init", help="set up ~/Locker from the template; never overwrites")
+    p.add_argument("--role", choices=sorted(ROLES), help="fills in role on Me.md")
+    p.add_argument("--move-classes", action="store_true",
+                   help="move ~/Classes into the Locker and leave a link at ~/Classes")
+    p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser("import", help="bring notes in from another app")
+    p.add_argument("what", choices=["classes"])
+    p.add_argument("--classes", help="OmaMastery folder (default ~/Classes)")
+    p.set_defaults(func=cmd_import)
+
+    p = sub.add_parser("doctor", help="check frontmatter, types, blocks and links")
+    p.add_argument("--show-names", action="store_true",
+                   help="show People/ notes and link targets (can print real names)")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_doctor)
+
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

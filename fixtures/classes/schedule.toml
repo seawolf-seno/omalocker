@@ -1,0 +1,5 @@
+# Made-up schedule for tests. Only first_day is read by omalocker.
+first_day = "2026-08-19"
+last_day = "2027-05-20"
+a_days = ["Mon", "Wed"]
+b_days = ["Tue", "Thu"]

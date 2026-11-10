@@ -1,0 +1,7 @@
+# Made-up class for omalocker tests. No real students.
+name = "Biology"
+course = "science"
+day = "A"
+block = 2
+room = "S104"
+sample = true
