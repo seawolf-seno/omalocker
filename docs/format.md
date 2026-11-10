@@ -15,6 +15,7 @@ A Locker is a folder (`~/Locker`) of Markdown notes with YAML frontmatter (Obsid
   Journal/         YYYY-MM-DD.md, one per day
   Work/<class>/    assignments, projects, writing
   Pathway/         goals, milestones, Formation Pathway copy
+  Mastery/         levels copied from teachers (students); graph output
   Inbox/           quick capture, sorted later
 ```
 
@@ -30,6 +31,10 @@ A Locker is a folder (`~/Locker`) of Markdown notes with YAML frontmatter (Obsid
 | `work` | `class`, `due`, `status` (idea/draft/turned-in/returned), `ideas`, `canvas_assignment` |
 | `milestone` | `date`, `source` (e.g. `pacterminus`), `evidence` |
 | `pathway` | `updated`, `source` (`formation-pathways`) |
+
+Any note may add `share`: `private` (owner only), or a list of extra audiences
+(`parent`, `teacher`, `advisor`, `activity`), on top of the defaults in `docs/plan.md`.
+Mastery copies from teachers go in `Mastery/<class>.md` (generated, read-only).
 
 `source` marks notes an app created. Apps rewrite only their own block:
 

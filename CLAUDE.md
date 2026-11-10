@@ -11,7 +11,12 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
 - Same agent rules as `~/Classes/AGENTS.md`: never open `roster.toml`, `mastery.csv`, or
   notes about real students.
 
+- **Each person's device is the source of truth** (seno, 2026-11-10). Only views (filtered on
+  the device, per audience) and the existing grades pipe leave it. See `docs/plan.md`.
+- Mastery graph is built from structured files, no AI. Graphify only on curriculum files.
+
 ## Status
-- 2026-11-09: repo created; plan (`docs/plan.md`), format v0 draft, template vault. No code.
-- Next: seno answers the decisions in `docs/plan.md`, then Phase 0/1 (`init`, `import
-  classes`, `doctor`, `make test-connections`).
+- 2026-11-09: repo created; plan, format v0 draft, template vault. No code.
+- 2026-11-10: plan revised: device = truth, per-audience views (FP as viewer host,
+  proposed), mastery graph, Obsidian kept.
+- Next: seno's open decisions in `docs/plan.md` (backup, FERPA, viewer host); Phase 0/1.
