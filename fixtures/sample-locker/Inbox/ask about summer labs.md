@@ -1,5 +1,6 @@
 ---
 type: inbox
-share: private
+share:
+  - private
 ---
 Ask [[Dr. Pell]] if the university summer lab thing takes sophomores.

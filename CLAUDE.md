@@ -22,5 +22,7 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
   proposed), mastery graph, Obsidian kept.
 - 2026-11-10: seno decided backup, parent access, custody, graduation; viewer is OmaLocker's
   own app, fully separate from FP.
+- 2026-11-10: Phase 0 sample Locker (`fixtures/sample-locker`); format decisions in
+  `docs/phase0.md` (joint type, milestones one note each, `share` always a list).
 - Next: open decisions in `docs/plan.md` (Obsidian terms, viewer hosting, sign-in, family
   records); Phase 0/1.

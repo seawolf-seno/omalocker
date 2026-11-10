@@ -1,5 +1,5 @@
 ---
-type: idea
+type: joint
 classes:
   - "[[Biology]]"
 ---

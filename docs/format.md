@@ -7,15 +7,16 @@ A Locker is a folder (`~/Locker`) of Markdown notes with YAML frontmatter (Obsid
 ~/Locker/
   Home.md          start here: this week, links to everything
   Me.md            who I am: role, grad year, pathway
-  AGENTS.md        rules for AI agents
+  AGENTS.md        rules for AI agents (type: guide)
   Classes/         one note per class (teachers: OmaMastery's class folders live here too)
   People/          teachers, mentors, classmates; for teachers, students (private)
   Activities/      clubs, sports, service, arts, ministry, jobs
-  Ideas/           core ideas and the joints that connect subjects
+  Ideas/           core ideas (type: idea) and the joints that connect subjects (type: joint)
   Journal/         YYYY-MM-DD.md, one per day
   Work/<class>/    assignments, projects, writing
-  Pathway/         goals and milestones (written in the Locker; nothing comes from FP)
-  Mastery/         levels copied from teachers (students); graph output
+  Pathway/         goals (written in the Locker; nothing comes from FP)
+  Pathway/Milestones/  one note per milestone, YYYY-MM-DD <name>.md
+  Mastery/         levels copied from teachers (students), one note per class; graph output
   Inbox/           quick capture, sorted later
 ```
 
@@ -24,17 +25,22 @@ A Locker is a folder (`~/Locker`) of Markdown notes with YAML frontmatter (Obsid
 | type | properties |
 |---|---|
 | `class` | `course`, `teacher` (link), `block`, `day` (A/B), `room`, `term`, `ideas` (links), `source` |
-| `person` | `role` (student/teacher/staff/mentor/family), `grad_year`, `classes`, `activities`, `private: true` for teacher notes about students |
+| `person` | `role` (student/teacher/staff/mentor/family), `grad_year`, `classes`, `activities`; teacher notes about students get `share: [private]` |
 | `activity` | `kind`, `leader` (link), `season`, `ideas` |
-| `idea` | `joint` (link to the shared joint), `classes` |
+| `idea` | `joint` (link to its joint note), `classes` |
+| `joint` | `classes` (links): a big idea shared across subjects; ideas link to it |
 | `journal` | `date`, `classes`, `people`, `activities` |
 | `work` | `class`, `due`, `status` (idea/draft/turned-in/returned), `ideas`, `canvas_assignment` |
-| `milestone` | `date`, `source` (e.g. `pacterminus`), `evidence` |
+| `milestone` | `date`, `source` (e.g. `pacterminus`), `evidence`. One note each in `Pathway/Milestones/` |
 | `pathway` | `updated` |
+| `mastery` | `class` (link), `source`. Generated in `Mastery/<class>.md`, read-only |
+| `home` | none. `Home.md` only |
+| `inbox` | none. Quick capture in `Inbox/` |
+| `guide` | none. `AGENTS.md` only |
 
-Any note may add `share`: `private` (owner only), or a list of extra audiences
-(`parent`, `teacher`, `advisor`, `activity`), on top of the defaults in `docs/plan.md`.
-Mastery copies from teachers go in `Mastery/<class>.md` (generated, read-only).
+Any note may add `share`, always a list: `[private]` (owner only), or extra audiences
+(`parent`, `teacher`, `advisor`, `activity`) on top of the defaults in `docs/plan.md`.
+`private` can't be combined with other audiences.
 
 `source` marks notes an app created. Apps rewrite only their own block:
 

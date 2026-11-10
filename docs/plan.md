@@ -101,7 +101,7 @@ mastery levels), with no AI, so it shows the teacher's judgment and nothing gues
 | **Grades → system of record** | unchanged | Existing path, not touched | Confirm OmaLocker sends no grades anywhere new |
 | **OmaClass** (Veyon) | Classes → Locker | `room` → class note property | Room shows on class note |
 | **pacos** | install | `omalocker` package; `~/Locker` from `template/`; managed `.obsidian/` | VM: teacher and student (`beno29`) get a Locker; student can't turn on plugins |
-| **PacTerminus** | Terminus → Locker | completion marker → `Pathway/Milestones.md` | VM: finish quest → milestone, visible in parent view |
+| **PacTerminus** | Terminus → Locker | completion marker → a note in `Pathway/Milestones/` | VM: finish quest → milestone, visible in parent view |
 | **Omawrite + Omacanvas turn-in** | both ways | Omawrite saves to `Work/<class>/`; turn-in submits from there | Fictional account submits a Locker file |
 | **Canvas** | Canvas → Locker | OmaMastery setup's token: assignments → `Work/<class>/` stubs | Sandbox course |
 | **Backup** | device → school | Encrypted backup of the whole Locker every 2 days; school IT holds the key | Wipe the VM, restore, links intact |
