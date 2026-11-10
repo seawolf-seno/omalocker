@@ -31,14 +31,16 @@ device.
 | Audience | Default view |
 |---|---|
 | Student | Everything (it's theirs) |
-| Parent / guardian | Course grades, milestones, mastery graph at the core-idea level, pathway. No journal, no notes. |
+| Parent / guardian | Opens at the high level: course grades, milestones, mastery graph at the core-idea level, pathway. Can expand to everything else, including teacher notes about their child, except notes the student marked `private`. Only the parent with primary custody; access lasts until graduation, including after the student turns 18. |
 | Teacher | Their own classes: the student's work and notes tagged with that class, objective-level mastery for that class |
 | Advisor / counselor | All classes at the core-idea level, activities, pathway |
 | Activity leader | Notes tagged with their activity |
 | Admin | Same as parent, plus attendance-type records if added later. Anything more goes through the records-request process |
 
 A student can share more on a single note (`share: [parent, teacher]`) or mark it
-`private`. Grades and milestones can't be hidden from parents.
+`private` (hidden from parents and everyone else). Only the student's own notes can be
+marked private: grades, milestones and teacher notes about the student can't be hidden
+from parents.
 
 **Viewer host (recommended): Formation Pathways.** It already has staff and family logins,
 consent records, row-level security, and separate staging and production databases. Its
@@ -91,7 +93,7 @@ mastery levels), with no AI, so it shows the teacher's judgment and nothing gues
 | **PacTerminus** | Terminus → Locker | completion marker → `Pathway/Milestones.md` | VM: finish quest → milestone, visible in parent view |
 | **Omawrite + Omacanvas turn-in** | both ways | Omawrite saves to `Work/<class>/`; turn-in submits from there | Fictional account submits a Locker file |
 | **Canvas** | Canvas → Locker | OmaMastery setup's token: assignments → `Work/<class>/` stubs | Sandbox course |
-| **Backup** | device → school | Encrypted backup of the whole Locker (see decisions) | Wipe the VM, restore, links intact |
+| **Backup** | device → school | Encrypted backup of the whole Locker every 2 days; school IT holds the key | Wipe the VM, restore, links intact |
 
 `make test-connections` builds a fictional school in a temp `HOME` and runs every flow,
 then `omalocker doctor` checks frontmatter, links, that each view holds only what its
@@ -109,19 +111,30 @@ teacher and advisor logins.
 **3. Student Locker in the pacos VM.** Package, managed Obsidian, Terminus milestone,
 Omawrite, encrypted backup and restore.
 **4. Pilot.** One class, after leadership signs off on the decisions below.
+**At graduation.** `omalocker graduate`: hand the student their Locker, then delete their
+views from FP and their backups from school storage.
+
+## Decisions made (seno, 2026-11-10)
+
+1. **Source of truth:** each person's device.
+2. **Backup:** encrypted (restic) to school storage every 2 days. School IT holds the key,
+   so a forgotten password doesn't lose a Locker. A lost device can lose up to 2 days of work.
+3. **Parent access:** parents can see everything, but the view opens at the high level.
+   Students can mark their own notes `private` from parents; teacher notes about the
+   student, grades and milestones can't be hidden.
+4. **After 18:** parents keep full access until graduation.
+5. **Which parent:** the parent with primary custody. FP's guardian records need a
+   primary-custody field.
+6. **Graduation:** the student keeps their Locker, and their data is deleted from school
+   servers (views on FP and backups).
+
+Leadership and counsel should still confirm 3–5 against FERPA before the pilot (FERPA
+rights normally move to the student at 18).
 
 ## Decisions still open
 
-1. **Backup is now required**, because the device is the truth. Recommended: encrypted
-   (restic) to school storage, with the key held by school IT in escrow.
-2. **FERPA.** Teacher notes about students are education records, and parents have a legal
-   right to inspect education records, so "high level by default" may not be enough on
-   request. Students' own notes are a different category. Leadership and counsel need to
-   confirm both.
-3. **Parent access after 18** (FERPA rights move to the student), and for divorced or
-   non-custodial parents: FP's guardian records need to say who counts as a parent.
-4. **Viewer host** = Formation Pathways (recommended) vs. a separate app.
-5. Obsidian's terms for school use (check the current terms; don't assume).
+1. **Viewer host** = Formation Pathways (recommended) vs. a separate app.
+2. Obsidian's terms for school use (check the current terms; don't assume).
 
 ## Risks
 
