@@ -2,8 +2,9 @@
 
 Each person's school life (classes, people, activities, writing, growth, pathway) as plain
 Markdown files in `~/Locker`. Open it in Obsidian to see how everything connects. Pacifica's
-other Omarchy apps (OmaMastery, PacTerminus, Omawrite turn-in, Formation Pathways) read and
-write into it.
+other Omarchy apps (OmaMastery, PacTerminus, Omawrite turn-in) read and write into it.
+Parents, teachers and advisors see it through OmaLocker's own viewer app, which is separate
+from Formation Pathways.
 
 - `template/`: the empty Locker every person starts with (open it in Obsidian to try).
 - `docs/format.md`: note types and properties.

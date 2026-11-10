@@ -42,12 +42,21 @@ A student can share more on a single note (`share: [parent, teacher]`) or mark i
 marked private: grades, milestones and teacher notes about the student can't be hidden
 from parents.
 
-**Viewer host (decided): Formation Pathways.** It already has staff and family logins,
-consent records, row-level security, and separate staging and production databases. Its
-database becomes the store for **views**, not truth: "one database" now means one place to
-*see*, while each person's device stays the source. Alternatives considered: a static
-Quartz site per audience (has no per-person login) and device-to-device sync (parents
-don't have school devices).
+**Viewer (decided): OmaLocker's own viewer app, fully separate from Formation Pathways**
+(seno, 2026-11-10). No connection to FP at all: OmaLocker doesn't use FP's logins, its
+family records, or its database, and FP sends nothing into a Locker. The viewer needs its
+own:
+
+- **Logins** for students, staff and parents.
+- **Family records**: who is each student's parent, with a primary-custody field. Only the
+  primary-custody parent gets a parent view.
+- **Role checks**: every request checks the viewer's role against the student before
+  showing a view.
+- **Staging and production**, kept apart. Staging holds fictional people only.
+
+It stores **views only**, never truth: each person's device stays the source. Alternatives
+considered: a static Quartz site per audience (has no per-person login) and
+device-to-device sync (parents don't have school devices).
 
 ## The editor: Obsidian, for now
 
@@ -85,8 +94,9 @@ mastery levels), with no AI, so it shows the teacher's judgment and nothing gues
 | Project | Flow | Contract | Test |
 |---|---|---|---|
 | **OmaMastery** (`~/Classes`) | Teacher device | Class folders live in the teacher's Locker; `ideas.toml`/`plan.toml` → `Classes/`, `Ideas/` notes; levels → mastery graph | Sample classes import; graph renders; `roster.toml`/`mastery.csv` never read by agents |
-| **Teacher → student levels** | via viewer host | Teacher pushes a class's levels; the student's Locker pulls its own into `Mastery/<class>.md` | Fictional class: a level change reaches the student and the parent view |
-| **Formation Pathways** | Device → host (views); host → Locker (pathway copy) | View files per audience; FP RLS checks each person's role | **Staging only**: fictional student, parent, teacher logins each see the right view |
+| **Teacher → student levels** | via the viewer | Teacher pushes a class's levels; the student's Locker pulls its own into `Mastery/<class>.md` | Fictional class: a level change reaches the student and the parent view |
+| **OmaLocker viewer** | Device → viewer (views only) | View files per audience; the viewer checks each person's role and, for parents, primary custody | **Staging only**: fictional student, parent (primary and non-custodial), teacher logins each see the right view, or none |
+| **Formation Pathways** | none | No connection, either way | Confirm OmaLocker sends nothing to FP and reads nothing from it |
 | **Grades → system of record** | unchanged | Existing path, not touched | Confirm OmaLocker sends no grades anywhere new |
 | **OmaClass** (Veyon) | Classes → Locker | `room` → class note property | Room shows on class note |
 | **pacos** | install | `omalocker` package; `~/Locker` from `template/`; managed `.obsidian/` | VM: teacher and student (`beno29`) get a Locker; student can't turn on plugins |
@@ -106,13 +116,13 @@ Obsidian.
 **1. Teacher Locker + mastery graph on seno's machine.** `init`, `import classes`,
 `mastery`, `doctor`, `make test-connections`; `~/Classes` moves into `~/Locker/Classes`
 with a symlink.
-**2. Views on FP staging.** Build views on the device, push to staging, fictional parent,
-teacher and advisor logins.
+**2. Viewer app on staging.** Build the viewer (logins, family records, role checks), build
+views on the device, push to staging, fictional parent, teacher and advisor logins.
 **3. Student Locker in the pacos VM.** Package, managed Obsidian, Terminus milestone,
 Omawrite, encrypted backup and restore.
 **4. Pilot.** One class, after leadership signs off on the decisions below.
 **At graduation.** `omalocker graduate`: hand the student their Locker, then delete their
-views from FP and their backups from school storage.
+views, login and family records from the viewer, and their backups from school storage.
 
 ## Decisions made (seno, 2026-11-10)
 
@@ -123,11 +133,12 @@ views from FP and their backups from school storage.
    Students can mark their own notes `private` from parents; teacher notes about the
    student, grades and milestones can't be hidden.
 4. **After 18:** parents keep full access until graduation.
-5. **Which parent:** the parent with primary custody. FP's guardian records need a
+5. **Which parent:** the parent with primary custody. The viewer's family records have a
    primary-custody field.
 6. **Graduation:** the student keeps their Locker, and their data is deleted from school
-   servers (views on FP and backups).
-7. **Viewer host:** Formation Pathways (not a separate app).
+   servers (the viewer and backups).
+7. **Viewer:** OmaLocker's own app, fully separate from Formation Pathways (no shared
+   logins, records or data, and no pathway copy from FP).
 
 Leadership and counsel should still confirm 3–5 against FERPA before the pilot (FERPA
 rights normally move to the student at 18).
@@ -135,6 +146,11 @@ rights normally move to the student at 18).
 ## Decisions still open
 
 1. Obsidian's terms for school use (check the current terms; don't assume).
+2. **Where the viewer runs** (a school server or a hosted service) and who keeps it running.
+3. **How people sign in**: school accounts for students and staff; parents need another way
+   (for example an emailed link).
+4. **Where family and custody records come from** (for example the school's records in
+   Blackbaud), and who updates them when custody changes.
 
 ## Risks
 
@@ -142,3 +158,7 @@ rights normally move to the student at 18).
 - `.obsidian/` can load code: managed by pacos for students, not writable.
 - Views get out of date when a device is offline. Show "as of <time>" on every view.
 - Single point of failure (only seno): keep the format readable with a text editor.
+- The viewer is a new app holding student data, with its own logins: more to build and
+  secure than reusing FP. Keep it small, and test the role checks in staging first.
+- Family records in the viewer can drift from the school's records. A wrong custody record
+  shows a student's Locker to the wrong parent.
