@@ -42,7 +42,7 @@ A student can share more on a single note (`share: [parent, teacher]`) or mark i
 marked private: grades, milestones and teacher notes about the student can't be hidden
 from parents.
 
-**Viewer host (recommended): Formation Pathways.** It already has staff and family logins,
+**Viewer host (decided): Formation Pathways.** It already has staff and family logins,
 consent records, row-level security, and separate staging and production databases. Its
 database becomes the store for **views**, not truth: "one database" now means one place to
 *see*, while each person's device stays the source. Alternatives considered: a static
@@ -127,14 +127,14 @@ views from FP and their backups from school storage.
    primary-custody field.
 6. **Graduation:** the student keeps their Locker, and their data is deleted from school
    servers (views on FP and backups).
+7. **Viewer host:** Formation Pathways (not a separate app).
 
 Leadership and counsel should still confirm 3–5 against FERPA before the pilot (FERPA
 rights normally move to the student at 18).
 
 ## Decisions still open
 
-1. **Viewer host** = Formation Pathways (recommended) vs. a separate app.
-2. Obsidian's terms for school use (check the current terms; don't assume).
+1. Obsidian's terms for school use (check the current terms; don't assume).
 
 ## Risks
 
