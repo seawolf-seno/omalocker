@@ -187,6 +187,82 @@ class ImportClasses(Env):
         self.assertIn("omalocker init", err)
 
 
+class Mastery(Env):
+    def setUp(self):
+        super().setUp()
+        self.run_cli("init", "--role", "teacher")
+        self.run_cli("import", "classes")
+
+    def test_counts_and_rollups(self):
+        code, out, err = self.run_cli("mastery")
+        self.assertEqual(code, 0, err)
+        # Latest row wins (Zz Ava: Developing then Proficient); unknown words are ignored.
+        feedback = self.note("Mastery/Biology/Model a predator-prey cycle and name its feedback.md")
+        self.assertIn("level: Proficient", feedback)
+        self.assertIn("level/proficient", feedback)
+        self.assertIn("Levels: Proficient 3.", feedback)
+        resp = self.note("Mastery/Biology/Explain how yeast releases energy with and without oxygen.md")
+        self.assertIn("level: Beginning", resp)  # 1-1 tie goes to the lower level
+        summary = self.note("Mastery/Biology.md")
+        self.assertIn("as_of: 2026-11-12", summary)
+        self.assertIn("scope: class", summary)
+        # Joint: each student's lowest idea. Ava Beginning, Ben Proficient, Cy Proficient.
+        html = self.note("Mastery/graph.html")
+        data = json.loads(html.split("const DATA = ", 1)[1].split(";\n", 1)[0])
+        bio = data["classes"][0]
+        self.assertEqual(bio["joints"][0]["dist"], [0, 1, 0, 2, 0])
+        self.assertEqual(data["asOf"], "2026-11-12")
+        code, out = self.run_cli("doctor")[:2]
+        self.assertEqual(code, 0, out)
+
+    def test_no_names_leave_the_csv(self):
+        self.run_cli("mastery")
+        for path in self.locker.rglob("*"):
+            if path.is_file() and "Classes" not in path.parts:
+                self.assertNotIn("Zz", path.read_text(), path)
+
+    def test_idempotent_and_removes_dropped_objectives(self):
+        self.run_cli("mastery")
+        code, out, _ = self.run_cli("mastery")
+        self.assertIn("0 files created, 0 updated", out)
+        (self.classes / "biology" / "plan.toml").write_text(
+            '[[objective]]\nid = "bio-feedback"\n'
+            'title = "Model a predator-prey cycle and name its feedback"\n'
+            'idea = "Feedback loops in ecosystems"\n')
+        mine = self.locker / "Mastery" / "Biology" / "my own note.md"
+        mine.write_text("---\ntype: inbox\n---\nMine.\n")
+        code, out, _ = self.run_cli("mastery")
+        self.assertIn("1 removed", out)
+        self.assertFalse((self.locker / "Mastery" / "Biology" /
+                          "Explain how yeast releases energy with and without oxygen.md").exists())
+        self.assertTrue(mine.exists())
+
+    def test_obsidian_colors_only_if_unset(self):
+        graph = self.locker / ".obsidian" / "graph.json"
+        graph.parent.mkdir()
+        graph.write_text('{"colorGroups": [{"query": "path:Journal", "color": {"a": 1, "rgb": 1}}]}')
+        self.run_cli("mastery")
+        self.assertIn("path:Journal", graph.read_text())
+        graph.write_text('{"showTags": false}')
+        self.run_cli("mastery")
+        config = json.loads(graph.read_text())
+        self.assertFalse(config["showTags"])
+        self.assertEqual(len(config["colorGroups"]), 5)
+
+    def test_needs_class_notes(self):
+        (self.locker / "Classes" / "Biology.md").unlink()
+        code, _, err = self.run_cli("mastery")
+        self.assertEqual(code, 1)
+        self.assertIn("import classes", err)
+
+    def test_class_without_levels(self):
+        (self.classes / "biology" / "mastery.csv").unlink()
+        self.run_cli("mastery")
+        note = self.note("Mastery/Biology/Model a predator-prey cycle and name its feedback.md")
+        self.assertIn("Not assessed yet.", note)
+        self.assertIn("level/not-assessed", note)
+
+
 class Doctor(Env):
     def setUp(self):
         super().setUp()

@@ -28,5 +28,8 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
 - 2026-11-10: Phase 1 CLI `bin/omalocker` (stdlib): `init [--role] [--move-classes]`,
   `import classes`, `doctor`. Tests: `make test`, `make test-connections`
   (fixture `fixtures/classes`, fictional). Import reads only class/ideas/plan.toml.
-- Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); `omalocker mastery`;
-  run init/import on seno's machine; open decisions in `docs/plan.md`.
+- 2026-11-10: `omalocker mastery`: per-class graph (counts per level, no names) as
+  `Mastery/` notes + offline `graph.html`; idea/joint level = each student's lowest. It is
+  the only command that reads `mastery.csv` (agents still never open it).
+- Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); run init/import/mastery
+  on seno's machine; per-student graph comes with Phase 2 (levels pushed to students).

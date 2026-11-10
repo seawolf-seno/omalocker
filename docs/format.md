@@ -33,7 +33,8 @@ A Locker is a folder (`~/Locker`) of Markdown notes with YAML frontmatter (Obsid
 | `work` | `class`, `due`, `status` (idea/draft/turned-in/returned), `ideas`, `canvas_assignment` |
 | `milestone` | `date`, `source` (e.g. `pacterminus`), `evidence`. One note each in `Pathway/Milestones/` |
 | `pathway` | `updated` |
-| `mastery` | `class` (link), `source`. Generated in `Mastery/<class>.md`, read-only |
+| `mastery` | `class` (link), `source`, `scope` (`class` on a teacher's device: counts per level, no names), `as_of` (date of the newest level). Generated in `Mastery/<class>.md`, read-only |
+| `objective` | `class`, `idea` (links), `week`, `level` (most common level word), `tags` (`level/<word>`, for Obsidian graph colors), `source`, `omamastery` (objective id). Generated in `Mastery/<class>/`, read-only |
 | `home` | none. `Home.md` only |
 | `inbox` | none. Quick capture in `Inbox/` |
 | `guide` | none. `AGENTS.md` only |

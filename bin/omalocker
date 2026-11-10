@@ -5,13 +5,16 @@ Python stdlib only. See docs/format.md for the note format.
 
   omalocker init [--role ROLE] [--move-classes]
   omalocker import classes
+  omalocker mastery
   omalocker doctor [--show-names] [--json]
 
-Never opens roster.toml, mastery.csv or notes.md in a class folder: they hold
-real students' names and the teacher's notes about them.
+Never opens roster.toml or notes.md in a class folder. Only `mastery` reads
+mastery.csv, to count levels; names stay in memory and never reach a note.
 """
 
 import argparse
+import collections
+import csv
 import datetime
 import json
 import os
@@ -25,8 +28,9 @@ VERSION = "0.1.0"
 
 TYPES = {
     "class", "person", "activity", "idea", "joint", "journal", "work",
-    "milestone", "pathway", "mastery", "home", "inbox", "guide",
+    "milestone", "pathway", "mastery", "objective", "home", "inbox", "guide",
 }
+LEVELS = ["Not yet", "Beginning", "Developing", "Proficient", "Extending"]
 AUDIENCES = {"private", "parent", "teacher", "advisor", "activity"}
 ROLES = {"student", "teacher", "staff", "mentor", "family"}
 WORK_STATUS = {"idea", "draft", "turned-in", "returned"}
@@ -172,7 +176,7 @@ def link(name):
 
 def link_target(value):
     m = LINK_RE.fullmatch(str(value).strip()) if value else None
-    return m.group(1).strip() if m else None
+    return m.group(1).strip().rstrip("\\") if m else None
 
 
 def note_name(name):
@@ -312,6 +316,7 @@ def read_classes(classes_dir):
             continue
         found.append({
             "id": folder.name,
+            "path": folder,
             "name": str(meta.get("name") or folder.name),
             "day": meta.get("day") or None,
             "block": meta.get("block"),
@@ -334,6 +339,11 @@ def existing_notes(folder):
                 props = None
             notes[path.stem] = (path, props)
     return notes
+
+
+def class_notes_by_id(notes_dir):
+    return {props.get(SOURCE): name for name, (_, props) in existing_notes(notes_dir).items()
+            if props and props.get("type") == "class" and props.get(SOURCE)}
 
 
 def upsert(path, owned, block, title, tail=""):
@@ -379,8 +389,7 @@ def cmd_import(args):
             counts[result] += 1
 
     # Class notes: found by their omamastery id first, so a renamed note stays put.
-    by_id = {props.get(SOURCE): name for name, (_, props) in existing_notes(notes_dir).items()
-             if props and props.get("type") == "class" and props.get(SOURCE)}
+    by_id = class_notes_by_id(notes_dir)
     managed_classes = set(by_id.values())
     idea_info, joint_ideas, idea_classes = {}, {}, {}
     for c in classes:
@@ -449,6 +458,430 @@ def cmd_import(args):
     print(f"  {counts['created']} notes created, {counts['updated']} updated"
           + (f", {counts['skipped']} skipped" if counts["skipped"] else ""))
     return 1 if counts["skipped"] else 0
+
+
+
+# ---------------------------------------------------------------- mastery
+#
+# A graph per class: joints -> core ideas -> objectives. Each node shows how
+# many students are at each level. A student's level for an idea is the lowest
+# of its assessed objectives, and for a joint the lowest of its ideas (the
+# OmaMastery rule: Proficient only when everything assessed is).
+
+LEVEL_COLORS = {  # validated ordinal ramp (dataviz skill), light and dark
+    "light": ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281"],
+    "dark": ["#184f95", "#256abf", "#3987e5", "#6da7ec", "#9ec5f4"],
+}
+
+
+def read_levels(folder):
+    """{objective id: {student: level index}} from mastery.csv, latest row wins.
+
+    Student names are only dictionary keys here; callers get counts."""
+    path = folder / "mastery.csv"
+    if not path.exists():
+        return {}, None
+    rows = []
+    with open(path, newline="", encoding="utf-8") as f:
+        for n, row in enumerate(csv.DictReader(f)):
+            level = (row.get("level") or "").strip()
+            if level in LEVELS and row.get("student") and row.get("objective"):
+                rows.append((row.get("date") or "", n, row["student"], row["objective"],
+                             LEVELS.index(level)))
+    rows.sort()
+    latest = {}
+    for _, _, student, objective, level in rows:
+        latest.setdefault(objective, {})[student] = level
+    return latest, (rows[-1][0] if rows else None)
+
+
+def counts(levels):
+    dist = [0] * len(LEVELS)
+    for level in levels:
+        dist[level] += 1
+    return dist
+
+
+def most_common(dist):
+    """The level most students are at; a tie goes to the lower level."""
+    if not any(dist):
+        return None
+    return LEVELS[max(range(len(dist)), key=lambda i: (dist[i], -i))]
+
+
+def class_graph(c, levels):
+    ideas = {note_name(i["name"]): i for i in c["ideas"]}
+    objectives = [o for o in c["objectives"] if o.get("id")]
+    for o in objectives:
+        name = note_name(o["idea"]) if o.get("idea") else None
+        if name and name not in ideas:
+            ideas[name] = {"name": o["idea"]}
+    by_idea = {name: [o for o in objectives if o.get("idea") and note_name(o["idea"]) == name]
+               for name in ideas}
+
+    def rollup(objective_ids):
+        per_student = {}
+        for oid in objective_ids:
+            for student, level in levels.get(oid, {}).items():
+                per_student[student] = min(level, per_student.get(student, level))
+        return per_student
+
+    idea_students = {name: rollup(o["id"] for o in objs) for name, objs in by_idea.items()}
+    joints = {}
+    for name, idea in ideas.items():
+        if idea.get("joint"):
+            joints.setdefault(note_name(idea["joint"]), []).append(name)
+    joint_nodes = []
+    for jname, members in joints.items():
+        per_student = {}
+        for m in members:
+            for student, level in idea_students[m].items():
+                per_student[student] = min(level, per_student.get(student, level))
+        joint_nodes.append({"name": jname, "ideas": members,
+                            "dist": counts(per_student.values())})
+    return {
+        "joints": joint_nodes,
+        "ideas": [{"name": n, "joint": note_name(i["joint"]) if i.get("joint") else None,
+                   "dist": counts(idea_students[n].values())} for n, i in ideas.items()],
+        "objectives": [{"id": o["id"], "title": str(o.get("title") or o["id"]),
+                        "idea": note_name(o["idea"]) if o.get("idea") else None,
+                        "week": str(o.get("week") or ""),
+                        "dist": counts(levels.get(o["id"], {}).values())}
+                       for o in sorted(objectives, key=lambda o: str(o.get("week", "")))],
+    }
+
+
+def dist_text(dist):
+    parts = [f"{LEVELS[i]} {n}" for i, n in reversed(list(enumerate(dist))) if n]
+    return ", ".join(parts) if parts else "not assessed yet"
+
+
+def level_tag(dist):
+    word = most_common(dist)
+    return "level/" + (word.lower().replace(" ", "-") if word else "not-assessed")
+
+
+def write_obsidian_colors(locker):
+    """Color the Obsidian graph by level, unless the person set color groups."""
+    path = locker / ".obsidian" / "graph.json"
+    try:
+        config = json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, ValueError):
+        return False
+    if not isinstance(config, dict) or config.get("colorGroups"):
+        return False
+    config["colorGroups"] = [
+        {"query": f"tag:#level/{word.lower().replace(' ', '-')}",
+         "color": {"a": 1, "rgb": int(color[1:], 16)}}
+        for word, color in zip(LEVELS, LEVEL_COLORS["light"])
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config, indent=2) + "\n")
+    return True
+
+
+def cmd_mastery(args):
+    locker = Path(args.locker or default_locker()).expanduser()
+    classes_dir = Path(args.classes or home() / "Classes").expanduser()
+    if not (locker / "Home.md").exists():
+        print(f"omalocker: no Locker at {locker}; run `omalocker init` first", file=sys.stderr)
+        return 1
+    if not classes_dir.is_dir():
+        print(f"omalocker: no classes folder at {classes_dir}", file=sys.stderr)
+        return 1
+    notes_dir, out_dir = locker / "Classes", locker / "Mastery"
+    by_id = class_notes_by_id(notes_dir)
+    page, counts_ = [], {"created": 0, "updated": 0, "removed": 0}
+    as_of_all = []
+    missing = []
+
+    def tally(result):
+        if result:
+            counts_[result] += 1
+
+    for c in read_classes(classes_dir):
+        cname = by_id.get(c["id"])
+        if not cname:
+            missing.append(c["name"])
+            continue
+        try:
+            levels, as_of = read_levels(c["path"])
+        except (OSError, UnicodeDecodeError, csv.Error) as e:
+            print(f"  skipped {c['id']}: can't read its levels ({e.__class__.__name__})",
+                  file=sys.stderr)
+            continue
+        if as_of:
+            as_of_all.append(as_of)
+        graph = class_graph(c, levels)
+        page.append({"name": cname, **graph})
+
+        folder = out_dir / cname
+        names, kept = {}, set()
+        for o in graph["objectives"]:
+            name = note_name(o["title"])
+            if name in names.values():
+                name = f"{name} ({o['id']})"
+            names[o["id"]] = name
+        for o in graph["objectives"]:
+            word = most_common(o["dist"])
+            owned = {"type": "objective", "class": link(cname)}
+            if o["idea"]:
+                owned["idea"] = link(o["idea"])
+            owned.update({"week": o["week"] or None, "level": word,
+                          "tags": [level_tag(o["dist"])], "source": SOURCE, SOURCE: o["id"]})
+            block = (f"Most common level: {word}.\n\n" if word else "Not assessed yet.\n\n") + \
+                f"Levels: {dist_text(o['dist'])}."
+            path = folder / f"{names[o['id']]}.md"
+            kept.add(path.name)
+            tally(upsert(path, owned, block, o["title"]))
+        for path in sorted(folder.glob("*.md")) if folder.is_dir() else []:
+            if path.name in kept:
+                continue
+            try:
+                props, _ = read_note(path)
+            except (FormatError, UnicodeDecodeError):
+                continue
+            if props and props.get("type") == "objective" and props.get("source") == SOURCE:
+                path.unlink()
+                counts_["removed"] += 1
+
+        rows = ["| Objective | Core idea | Week | Most common | Levels |", "|---|---|---|---|---|"]
+        for o in graph["objectives"]:
+            idea = link(o["idea"]) if o["idea"] else ""
+            obj = f"[[{cname}/{names[o['id']]}\\|{o['title']}]]"  # \| inside a table
+            rows.append(f"| {obj} | {idea} | {o['week']} | {most_common(o['dist']) or 'Not assessed'}"
+                        f" | {dist_text(o['dist'])} |")
+        ideas = ["| Core idea | Joint | Most common | Levels |", "|---|---|---|---|"]
+        for i in graph["ideas"]:
+            joint = link(i["joint"]) if i["joint"] else ""
+            ideas.append(f"| {link(i['name'])} | {joint} | {most_common(i['dist']) or 'Not assessed'}"
+                         f" | {dist_text(i['dist'])} |")
+        block = (f"Levels as of {as_of or 'no levels yet'}. Counts only: no names. "
+                 f"A student's level for a core idea is the lowest of its assessed objectives; "
+                 f"a tie for most common goes to the lower level.\n\n"
+                 + "\n".join(ideas) + "\n\n" + "\n".join(rows)
+                 + "\n\nGraph: open `Mastery/graph.html` in a browser.")
+        owned = {"type": "mastery", "class": link(cname), "scope": "class",
+                 "as_of": as_of, "source": SOURCE, SOURCE: c["id"]}
+        tally(upsert(out_dir / f"{cname}.md", owned, block, f"{cname}: mastery"))
+
+    as_of = max(as_of_all) if as_of_all else None
+    html = MASTERY_HTML.replace("__DATA__", json.dumps(
+        {"asOf": as_of, "levels": LEVELS, "colors": LEVEL_COLORS, "classes": page},
+        ensure_ascii=False).replace("</", "<\\/"))
+    tally(write_if_changed(out_dir / "graph.html", html))
+    colored = write_obsidian_colors(locker)
+
+    for name in missing:
+        print(f"  skipped {name}: no class note yet; run `omalocker import classes`",
+              file=sys.stderr)
+    print(f"Mastery graph for {len(page)} classes in {out_dir}")
+    print(f"  {counts_['created']} files created, {counts_['updated']} updated"
+          + (f", {counts_['removed']} removed" if counts_["removed"] else ""))
+    print(f"  open {out_dir / 'graph.html'} in a browser")
+    if colored:
+        print("  Obsidian's graph now colors objectives by level")
+    return 1 if missing else 0
+
+
+MASTERY_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mastery graph</title>
+<style>
+:root {
+  --bg: #fcfcfb; --surface: #ffffff; --ink: #1f1f1d; --muted: #6b6a66; --line: #d9d8d4;
+  --edge: #c4c3be; --none: #ffffff;
+  --l0: #86b6ef; --l1: #5598e7; --l2: #2a78d6; --l3: #1c5cab; --l4: #104281;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1a1a19; --surface: #232321; --ink: #ecebe7; --muted: #a3a29d; --line: #3a3a37;
+    --edge: #4a4a46; --none: #232321;
+    --l0: #184f95; --l1: #256abf; --l2: #3987e5; --l3: #6da7ec; --l4: #9ec5f4;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #1a1a19; --surface: #232321; --ink: #ecebe7; --muted: #a3a29d; --line: #3a3a37;
+  --edge: #4a4a46; --none: #232321;
+  --l0: #184f95; --l1: #256abf; --l2: #3987e5; --l3: #6da7ec; --l4: #9ec5f4;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1200px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+.sub { color: var(--muted); margin: 0 0 16px; }
+.bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+.tabs button { font: inherit; padding: 6px 12px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink); }
+.tabs button[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.legend { display: flex; flex-wrap: wrap; gap: 12px; color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.sw.none { border: 1.5px dashed var(--muted); }
+.scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+svg { display: block; }
+svg text { fill: var(--ink); font-size: 13px; }
+svg .muted { fill: var(--muted); font-size: 12px; }
+svg .head { fill: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.node rect.card { fill: var(--surface); stroke: var(--line); }
+.node:hover rect.card, .node.on rect.card { stroke: var(--ink); }
+.edge { fill: none; stroke: var(--edge); stroke-width: 1.5; }
+.edge.on { stroke: var(--ink); }
+#tip { position: fixed; pointer-events: none; background: var(--ink); color: var(--bg);
+  padding: 8px 10px; border-radius: 8px; font-size: 13px; max-width: 280px; display: none; z-index: 2; }
+details { margin-top: 16px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; }
+.empty { padding: 24px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Mastery graph</h1>
+  <p class="sub" id="sub"></p>
+  <div class="bar tabs" id="tabs" role="group" aria-label="Class"></div>
+  <div class="legend" id="legend"></div>
+  <div class="scroll"><svg id="graph" role="img" aria-label="Mastery graph"></svg></div>
+  <details><summary>Table</summary><div id="table"></div></details>
+</main>
+<div id="tip" role="tooltip"></div>
+<script>
+const DATA = __DATA__;
+const L = DATA.levels, NS = "http://www.w3.org/2000/svg";
+const color = i => `var(--l${i})`;
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const most = d => { let b = -1; d.forEach((n, i) => { if (n && (b < 0 || n > d[b])) b = i; }); return b; };
+const words = d => d.map((n, i) => n ? `${L[i]}: ${n}` : "").filter(Boolean).reverse().join("<br>") || "Not assessed yet";
+
+$("sub").textContent = (DATA.asOf ? `Levels as of ${DATA.asOf}. ` : "No levels yet. ") +
+  "Each node shows how many students are at each level; its color is the most common level (a tie goes to the lower one). " +
+  "A core idea counts each student's lowest assessed objective in it.";
+$("legend").innerHTML = L.map((w, i) => `<span><i class="sw" style="background:${color(i)}"></i>${w}</span>`).join("") +
+  `<span><i class="sw none"></i>Not assessed</span>`;
+
+const views = DATA.classes.map(c => ({ name: c.name, cls: c }));
+if (DATA.classes.length > 1) views.push({ name: "All classes", all: true });
+let current = 0;
+function tabs() {
+  $("tabs").innerHTML = views.map((v, i) =>
+    `<button aria-pressed="${i === current}" data-i="${i}">${esc(v.name)}</button>`).join("");
+  $("tabs").querySelectorAll("button").forEach(b => b.onclick = () => { current = +b.dataset.i; tabs(); draw(); });
+}
+
+function columns(v) {
+  if (!v.all) {
+    const c = v.cls;
+    const jointOrder = c.joints.map(j => j.name);
+    const ideas = [...c.ideas].sort((a, b) => jointOrder.indexOf(a.joint) - jointOrder.indexOf(b.joint));
+    const ideaOrder = ideas.map(i => i.name);
+    const objs = [...c.objectives].sort((a, b) => ideaOrder.indexOf(a.idea) - ideaOrder.indexOf(b.idea));
+    return [
+      { head: "Joints", nodes: c.joints.map(j => ({ key: "j:" + j.name, label: j.name, dist: j.dist })) },
+      { head: "Core ideas", nodes: ideas.map(i => ({ key: "i:" + i.name, label: i.name, dist: i.dist,
+          parent: i.joint ? "j:" + i.joint : null })) },
+      { head: "Objectives", nodes: objs.map(o => ({ key: "o:" + o.id, label: o.title, dist: o.dist,
+          parent: o.idea ? "i:" + o.idea : null, note: o.week ? `Week of ${o.week}` : "" })) },
+    ];
+  }
+  const joints = new Map();
+  DATA.classes.forEach(c => c.joints.forEach(j => {
+    const prev = joints.get(j.name);
+    joints.set(j.name, prev ? prev.map((n, i) => n + j.dist[i]) : [...j.dist]);
+  }));
+  const jointNames = [...joints.keys()];
+  const ideas = DATA.classes.flatMap(c => c.ideas.map(i => ({ ...i, cls: c.name })))
+    .sort((a, b) => jointNames.indexOf(a.joint) - jointNames.indexOf(b.joint));
+  return [
+    { head: "Joints", nodes: jointNames.map(n => ({ key: "j:" + n, label: n, dist: joints.get(n) })) },
+    { head: "Core ideas, by class", nodes: ideas.map(i => ({ key: `i:${i.cls}/${i.name}`, label: i.name,
+        note: i.cls, sub: i.cls, dist: i.dist, parent: i.joint ? "j:" + i.joint : null })) },
+  ];
+}
+
+const W = 290, H = 56, GAP = 12, COLGAP = 90, PAD = 24, TOP = 44;
+function el(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function clip(s, n) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+
+function draw() {
+  const svg = $("graph"); svg.innerHTML = "";
+  if (!views.length) { svg.outerHTML = `<div class="empty">No classes yet. Run omalocker import classes, then omalocker mastery.</div>`; return; }
+  const cols = columns(views[current]);
+  const tallest = Math.max(1, ...cols.map(c => c.nodes.length));
+  const height = TOP + tallest * (H + GAP) + PAD;
+  const width = PAD * 2 + cols.length * W + (cols.length - 1) * COLGAP;
+  svg.setAttribute("width", width); svg.setAttribute("height", height);
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  const pos = {}, edges = el("g", {}, svg), nodes = el("g", {}, svg);
+  cols.forEach((col, ci) => {
+    const x = PAD + ci * (W + COLGAP);
+    const offset = (tallest - col.nodes.length) * (H + GAP) / 2;
+    el("text", { x, y: 24, class: "head" }, svg).textContent = col.head;
+    col.nodes.forEach((n, ni) => { pos[n.key] = { x, y: TOP + offset + ni * (H + GAP), n }; });
+  });
+  const links = [];
+  for (const k in pos) {
+    const p = pos[k], parent = p.n.parent && pos[p.n.parent];
+    if (!parent) continue;
+    const x1 = parent.x + W, y1 = parent.y + H / 2, x2 = p.x, y2 = p.y + H / 2, mx = (x1 + x2) / 2;
+    links.push({ from: p.n.parent, to: k,
+      path: el("path", { d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`, class: "edge" }, edges) });
+  }
+  for (const k in pos) {
+    const { x, y, n } = pos[k], g = el("g", { class: "node", tabindex: 0 }, nodes);
+    const m = most(n.dist);
+    el("rect", { x, y, width: W, height: H, rx: 8, class: "card" }, g);
+    if (m >= 0) el("rect", { x: x + 6, y: y + 6, width: 6, height: H - 12, rx: 3, fill: color(m) }, g);
+    else el("rect", { x: x + 6.75, y: y + 6.75, width: 4.5, height: H - 13.5, rx: 2, fill: "none",
+      stroke: "var(--muted)", "stroke-dasharray": "3 2", "stroke-width": 1.5 }, g);
+    el("text", { x: x + 20, y: y + 22 }, g).textContent = clip(n.label, 36);
+    el("text", { x: x + 20, y: y + 41, class: "muted" }, g).textContent =
+      clip((m >= 0 ? "Most: " + L[m] : "Not assessed") + (n.sub ? " · " + n.sub : ""), 26);
+    const total = n.dist.reduce((a, b) => a + b, 0);
+    if (total) {
+      let bx = x + W - 82; const bw = 72;
+      n.dist.forEach((c, i) => {
+        if (!c) return;
+        const w = Math.max(2, bw * c / total - 2);
+        el("rect", { x: bx, y: y + 34, width: w, height: 8, rx: 2, fill: color(i) }, g);
+        bx += w + 2;
+      });
+    }
+    const show = e => {
+      g.classList.add("on");
+      links.forEach(l => l.path.classList.toggle("on", l.from === k || l.to === k));
+      const t = $("tip");
+      t.innerHTML = `<strong>${esc(n.label)}</strong>${n.note ? "<br>" + esc(n.note) : ""}<br>${words(n.dist)}`;
+      t.style.display = "block";
+      const r = e.clientX !== undefined && e.type !== "focus" ? { x: e.clientX, y: e.clientY } : (() => {
+        const b = g.getBoundingClientRect(); return { x: b.right, y: b.top }; })();
+      t.style.left = Math.min(r.x + 14, innerWidth - t.offsetWidth - 8) + "px";
+      t.style.top = Math.min(r.y + 14, innerHeight - t.offsetHeight - 8) + "px";
+    };
+    const hide = () => { g.classList.remove("on"); links.forEach(l => l.path.classList.remove("on")); $("tip").style.display = "none"; };
+    g.addEventListener("mousemove", show); g.addEventListener("focus", show);
+    g.addEventListener("mouseleave", hide); g.addEventListener("blur", hide);
+  }
+  $("table").innerHTML = `<table><thead><tr>${cols.map(c => `<th>${esc(c.head)}</th>`).join("")}</tr></thead><tbody>` +
+    cols.flatMap(c => c.nodes.map((n, i) => ({ c: cols.indexOf(c), n }))).map(({ c, n }) =>
+      `<tr>${cols.map((_, i) => `<td>${i === c ? esc(n.label) + (n.note ? ` <span style="color:var(--muted)">(${esc(n.note)})</span>` : "") + "<br>" + words(n.dist) : ""}</td>`).join("")}</tr>`).join("") +
+    "</tbody></table>";
+}
+tabs(); draw();
+</script>
+</body>
+</html>
+"""
 
 
 # ---------------------------------------------------------------- doctor
@@ -539,8 +972,10 @@ def check_note(rel, text, index):
     if kind == "milestone" and not (rel.parent.as_posix() == "Pathway/Milestones"
                                     and re.match(r"\d{4}-\d{2}-\d{2} ", rel.name)):
         problems.append("milestones go in Pathway/Milestones/ as YYYY-MM-DD <name>.md")
-    if kind == "mastery" and folder != "Mastery":
-        problems.append("mastery notes go in Mastery/")
+    if kind in ("mastery", "objective") and folder != "Mastery":
+        problems.append(f"{kind} notes go in Mastery/")
+    if kind == "objective" and props.get("level") and props["level"] not in LEVELS:
+        problems.append(f"level {props['level']!r} isn't one of {', '.join(LEVELS)}")
     if kind == "home" and rel != Path("Home.md"):
         problems.append("type home is only for Home.md")
     if kind == "guide" and rel.name != "AGENTS.md":
@@ -571,7 +1006,7 @@ def check_note(rel, text, index):
         values.extend(v if isinstance(v, list) else [v])
     prose = CODE_RE.sub("", FENCE_RE.sub("", body))
     targets = [t for t in (link_target(v) for v in values if v) if t is not None]
-    targets += [m.group(1) for m in LINK_RE.finditer(prose)]
+    targets += [m.group(1).rstrip("\\") for m in LINK_RE.finditer(prose)]
     for t in targets:
         if not resolves(t, index):
             broken.append(t)
@@ -648,6 +1083,10 @@ def main(argv=None):
     p.add_argument("what", choices=["classes"])
     p.add_argument("--classes", help="OmaMastery folder (default ~/Classes)")
     p.set_defaults(func=cmd_import)
+
+    p = sub.add_parser("mastery", help="mastery graph per class: Mastery/ notes and graph.html")
+    p.add_argument("--classes", help="OmaMastery folder (default ~/Classes)")
+    p.set_defaults(func=cmd_mastery)
 
     p = sub.add_parser("doctor", help="check frontmatter, types, blocks and links")
     p.add_argument("--show-names", action="store_true",

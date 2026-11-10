@@ -26,6 +26,15 @@ if grep -rq "Zz Fictional" "$HOME/Locker" --include='*.md' --exclude-dir=geometr
   echo "a roster name reached a Locker note" >&2; exit 1
 fi
 
+step "omalocker mastery (twice: second run changes nothing)"
+chmod 644 "$HOME"/Locker/Classes/*/mastery.csv
+"$omalocker" mastery
+"$omalocker" mastery | grep -q "0 files created, 0 updated"
+test -f "$HOME/Locker/Mastery/graph.html"
+if grep -rq "Zz" "$HOME/Locker/Mastery" "$HOME/Locker/.obsidian"; then
+  echo "a student name reached Mastery/" >&2; exit 1
+fi
+
 step "omalocker doctor"
 "$omalocker" doctor
 
