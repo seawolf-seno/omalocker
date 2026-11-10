@@ -62,7 +62,8 @@ device-to-device sync (parents don't have school devices).
 
 Obsidian on the device: offline, plain Markdown, graph, backlinks and Bases with no
 community plugins, mature on Linux (installed here, 1.14.4). It's closed source, but
-because the files are plain Markdown, it's easy to replace. Others considered:
+because the files are plain Markdown, it's easy to replace. Its terms require users to be
+adults, so students need Obsidian's written permission first (see open decisions). Others considered:
 
 - **Logseq**: open source, but built around an outliner; check whether its newer
   database version still keeps plain files before relying on it.
@@ -145,7 +146,20 @@ rights normally move to the student at 18).
 
 ## Decisions still open
 
-1. Obsidian's terms for school use (check the current terms; don't assume).
+1. **Obsidian for students under 18.** Checked 2026-11-10 (terms, license and privacy
+   policy all last updated 2025 or earlier):
+   - **Cost:** free for schools. The license lists "educational institutions" under free
+     use; the commercial license is optional.
+   - **Age:** the terms say "You may use the Services only if you have reached the age of
+     majority where you live", and "Services" includes the app. Nothing lets a parent or
+     school accept for a student. Under the current terms, students under 18 can't use it.
+   - **Privacy:** notes are "never sent to our servers"; no personal data or telemetry.
+     The app only goes online for update checks, plugin and theme browsing, and embedded
+     web pages; pacos turns these off for students.
+   - **Next:** email Obsidian for written permission for students under 18 using the
+     desktop app with no account, installed by the school. Keep the reply on file.
+     Teachers and staff can use it now. If Obsidian says no, students get an open-source
+     editor (SilverBullet or Logseq) instead; the Locker files don't change.
 2. **Where the viewer runs** (a school server or a hosted service) and who keeps it running.
 3. **How people sign in**: school accounts for students and staff; parents need another way
    (for example an emailed link).
