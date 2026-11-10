@@ -1,0 +1,5 @@
+.fizzy.yaml
+__pycache__/
+build/
+*.pkg.tar.zst
+.obsidian/workspace*.json
