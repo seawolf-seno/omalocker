@@ -1,0 +1,10 @@
+[Unit]
+Description=Check every hour whether ~/Locker is due for a backup
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1h
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

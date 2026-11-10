@@ -1,0 +1,11 @@
+[Unit]
+Description=Back up ~/Locker (encrypted, OmaLocker)
+Documentation=https://github.com/seawolf-seno/omalocker/blob/main/docs/backup.md
+ConditionPathExists=%h/Locker/Home.md
+
+[Service]
+Type=oneshot
+# Backs up only when the last good backup is older than every_days (default 2).
+ExecStart=/usr/bin/omalocker backup --if-due
+Nice=10
+IOSchedulingClass=idle

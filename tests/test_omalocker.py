@@ -7,6 +7,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,7 +26,10 @@ class Env(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.old_home = os.environ.get("HOME")
         os.environ["HOME"] = str(self.tmp)
-        os.environ.pop("OMALOCKER_LOCKER", None)
+        self.saved_env = {k: os.environ.pop(k) for k in list(os.environ)
+                          if k.startswith("XDG_") or k.startswith("OMALOCKER_")}
+        # Never the real /etc or ~/.config backup settings.
+        os.environ["OMALOCKER_BACKUP_CONFIG"] = str(self.tmp / "backup.toml")
         self.locker = self.tmp / "Locker"
         self.classes = self.tmp / "Classes"
         shutil.copytree(REPO / "fixtures" / "classes", self.classes)
@@ -36,6 +40,9 @@ class Env(unittest.TestCase):
                 os.chmod(Path(root, name), 0o700, follow_symlinks=False) \
                     if not Path(root, name).is_symlink() else None
         shutil.rmtree(self.tmp)
+        for k in [k for k in os.environ if k.startswith("XDG_") or k.startswith("OMALOCKER_")]:
+            del os.environ[k]
+        os.environ.update(self.saved_env)
         if self.old_home is not None:
             os.environ["HOME"] = self.old_home
 
@@ -261,6 +268,145 @@ class Mastery(Env):
         note = self.note("Mastery/Biology/Model a predator-prey cycle and name its feedback.md")
         self.assertIn("Not assessed yet.", note)
         self.assertIn("level/not-assessed", note)
+
+
+def working_restic():
+    """restic from OMALOCKER_RESTIC or PATH, if `restic version` runs (not a broken shim)."""
+    import subprocess
+    candidate = os.environ.get("OMALOCKER_RESTIC") or shutil.which("restic")
+    try:
+        ok = candidate and subprocess.run([candidate, "version"], capture_output=True).returncode == 0
+    except OSError:
+        ok = False
+    return candidate if ok else None
+
+
+RESTIC = working_restic()
+
+
+class Backup(Env):
+    def setUp(self):
+        super().setUp()
+        self.run_cli("init")
+        shutil.rmtree(self.locker)
+        shutil.copytree(REPO / "fixtures" / "sample-locker", self.locker)
+        self.key = self.tmp / "key"
+        self.key.write_text("fictional-test-key-0123456789\n")
+        self.configure()
+
+    def configure(self, **extra):
+        lines = [f'repository = "{self.tmp}/repo/{{user}}"', f'password_file = "{self.key}"']
+        lines += [f"{k} = {v}" for k, v in extra.items()]
+        Path(os.environ["OMALOCKER_BACKUP_CONFIG"]).write_text("\n".join(lines) + "\n")
+
+    def test_not_set_up(self):
+        os.environ["OMALOCKER_BACKUP_CONFIG"] = str(self.tmp / "missing.toml")
+        code, _, err = self.run_cli("backup")
+        self.assertEqual(code, 1)
+        self.assertIn("isn't set up", err)
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("backup", out)
+
+    def test_key_never_on_the_command_line(self):
+        log = self.tmp / "argv.log"
+        fake = self.tmp / "fake-restic"
+        fake.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\nenv | grep RESTIC_ >> {log}\n"
+                        "echo 'Fatal: no' >&2; exit 1\n")
+        fake.chmod(0o755)
+        os.environ["OMALOCKER_RESTIC"] = str(fake)
+        code, _, err = self.run_cli("backup")
+        self.assertEqual(code, 1)
+        logged = log.read_text()
+        self.assertNotIn("fictional-test-key", logged)
+        self.assertIn(f"RESTIC_PASSWORD_FILE={self.key}", logged)
+        self.assertIn("can't open the backup repository", err)
+
+    def test_unreadable_key(self):
+        self.key.chmod(0)
+        code, _, err = self.run_cli("backup")
+        self.assertEqual(code, 1)
+        self.assertIn("ask school IT", err)
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("never backed up", out)
+        self.assertIn("ask school IT", out)
+
+
+@unittest.skipUnless(RESTIC, "restic isn't installed")
+class BackupWithRestic(Backup):
+    def setUp(self):
+        super().setUp()
+        os.environ["OMALOCKER_RESTIC"] = RESTIC
+
+    def at(self, days):
+        os.environ["OMALOCKER_NOW"] = f"2026-11-{10 + days:02d}T12:00:00+00:00"
+
+    def test_backup_wipe_restore(self):
+        self.at(0)
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("never backed up", out)
+        code, out, err = self.run_cli("backup")
+        self.assertEqual(code, 0, err)
+        self.assertIn("29 files", out)
+        self.assertEqual(self.run_cli("doctor")[0], 0)
+
+        code, out, _ = self.run_cli("backup", "--if-due")
+        self.assertIn("next one is due", out)
+        self.at(4)
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("4 days ago", out)
+
+        code, _, err = self.run_cli("restore")
+        self.assertEqual(code, 1)
+        self.assertIn("nothing was restored over it", err)
+        shutil.rmtree(self.locker)
+        code, out, err = self.run_cli("restore")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(p.relative_to(self.locker) for p in self.locker.rglob("*")),
+                         sorted(p.relative_to(REPO / "fixtures" / "sample-locker")
+                                for p in (REPO / "fixtures" / "sample-locker").rglob("*")))
+        self.assertEqual(self.note("Journal/2026-11-10.md"),
+                         (REPO / "fixtures" / "sample-locker" / "Journal" / "2026-11-10.md").read_text())
+        code, out, _ = self.run_cli("--locker", str(self.locker), "doctor", "--json")
+        self.assertEqual(json.loads(out)["issues"], [])
+
+        other = self.tmp / "other"
+        other.mkdir()
+        (other / "x").write_text("x")
+        code, _, err = self.run_cli("restore", "--to", str(other))
+        self.assertEqual(code, 1)
+        self.assertIn("isn't empty", err)
+        self.assertFalse(list(self.tmp.glob(".omalocker-restore-*")))
+
+    def test_if_due_and_keep_last(self):
+        self.configure(keep_last=2)
+        for day in (0, 2, 4):
+            self.at(day)
+            code, out, err = self.run_cli("backup", "--if-due")
+            self.assertEqual(code, 0, err)
+            self.assertIn("Backed up", out)
+        self.at(5)
+        self.assertIn("next one is due", self.run_cli("backup", "--if-due")[1])
+        code, out, _ = self.run_cli("backup", "--status")
+        self.assertIn("2 snapshots", out)
+
+    def test_unreadable_file_still_backs_up_the_rest(self):
+        secret = self.locker / "Inbox" / "locked.md"
+        secret.write_text("---\ntype: inbox\n---\n")
+        secret.chmod(0)
+        code, out, err = self.run_cli("backup")
+        self.assertEqual(code, 0, err)
+        self.assertIn("couldn't be read", out)
+
+    def test_wrong_key(self):
+        self.run_cli("backup")
+        self.key.write_text("a-different-key\n")
+        code, _, err = self.run_cli("backup")
+        self.assertEqual(code, 1)
+        self.assertIn("can't open the backup repository", err)
 
 
 class Doctor(Env):

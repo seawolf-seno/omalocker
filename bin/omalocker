@@ -6,6 +6,8 @@ Python stdlib only. See docs/format.md for the note format.
   omalocker init [--role ROLE] [--move-classes]
   omalocker import classes
   omalocker mastery
+  omalocker backup [--if-due | --status]
+  omalocker restore [--to DIR] [--snapshot ID]
   omalocker doctor [--show-names] [--json]
 
 Never opens roster.toml or notes.md in a class folder. Only `mastery` reads
@@ -20,6 +22,8 @@ import json
 import os
 import re
 import shutil
+import socket
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -884,6 +888,283 @@ tabs(); draw();
 """
 
 
+# ---------------------------------------------------------------- backup
+#
+# Encrypted backup of the whole Locker with restic (decided 2026-11-10: every
+# 2 days, school IT holds the key). Settings come from school IT:
+#
+#   /etc/omalocker/backup.toml (or ~/.config/omalocker/backup.toml)
+#   repository = "rest:https://backup.school.example/{user}"
+#   password_file = "/etc/omalocker/backup-key"
+#   every_days = 2
+#   keep_last = 30        # 0: the device never deletes snapshots (append-only server)
+#
+# The password is passed to restic as a file, never on a command line.
+
+BACKUP_DEFAULTS = {"every_days": 2, "keep_last": 30}
+BACKUP_EXCLUDES = [".obsidian/workspace*.json", "*.omalocker-tmp", ".trash"]
+
+
+class BackupError(Exception):
+    pass
+
+
+def backup_config_paths():
+    if os.environ.get("OMALOCKER_BACKUP_CONFIG"):
+        return [Path(os.environ["OMALOCKER_BACKUP_CONFIG"])]
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or home() / ".config")
+    return [config_home / "omalocker" / "backup.toml", Path("/etc/omalocker/backup.toml")]
+
+
+def load_backup_config():
+    """The settings, or None when backup isn't set up on this device."""
+    for path in backup_config_paths():
+        if path.exists():
+            try:
+                with open(path, "rb") as f:
+                    raw = tomllib.load(f)
+            except (OSError, tomllib.TOMLDecodeError) as e:
+                raise BackupError(f"can't read {path}: {e}")
+            cfg = {**BACKUP_DEFAULTS, **raw, "path": path}
+            if not cfg.get("repository") or not cfg.get("password_file"):
+                raise BackupError(f"{path} needs repository and password_file")
+            user = os.environ.get("USER") or home().name
+            cfg["repository"] = str(cfg["repository"]).format(user=user, host=socket.gethostname())
+            cfg["password_file"] = str(Path(str(cfg["password_file"])).expanduser())
+            return cfg
+    return None
+
+
+def state_path():
+    state_home = Path(os.environ.get("XDG_STATE_HOME") or home() / ".local" / "state")
+    return state_home / "omalocker" / "backup.json"
+
+
+def read_state():
+    try:
+        return json.loads(state_path().read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def write_state(**changes):
+    state = {**read_state(), **changes}
+    path = state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2) + "\n")
+    os.replace(tmp, path)
+
+
+def now():
+    fixed = os.environ.get("OMALOCKER_NOW")  # tests
+    if fixed:
+        return datetime.datetime.fromisoformat(fixed)
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def restic(cfg, *args):
+    if not os.access(cfg["password_file"], os.R_OK):
+        raise BackupError(f"can't read the backup key at {cfg['password_file']}; ask school IT")
+    env = {**os.environ, "RESTIC_REPOSITORY": cfg["repository"],
+           "RESTIC_PASSWORD_FILE": cfg["password_file"]}
+    env.pop("RESTIC_PASSWORD", None)
+    env.pop("RESTIC_PASSWORD_COMMAND", None)
+    binary = os.environ.get("OMALOCKER_RESTIC", "restic")
+    try:
+        return subprocess.run([binary, *args], env=env, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise BackupError("restic isn't installed (pacman -S restic)")
+
+
+def restic_error(result):
+    lines = [l for l in (result.stderr or "").strip().splitlines() if l.strip()]
+    if not lines:
+        return f"restic exited {result.returncode}"
+    try:  # --json runs report errors as JSON lines
+        msg = json.loads(lines[-1])
+        return msg.get("message") or msg.get("error", {}).get("message") or lines[-1]
+    except (ValueError, AttributeError):
+        return lines[-1]
+
+
+def backup_locker(cfg, locker):
+    """Run one backup. Returns the summary dict restic printed."""
+    probe = restic(cfg, "cat", "config")
+    if probe.returncode == 10:  # no repository there yet
+        made = restic(cfg, "init")
+        if made.returncode != 0:
+            raise BackupError(f"couldn't create the backup repository: {restic_error(made)}")
+    elif probe.returncode != 0:
+        raise BackupError(f"can't open the backup repository: {restic_error(probe)}")
+    args = ["backup", str(locker), "--json", "--tag", "omalocker", "--host", socket.gethostname()]
+    for pattern in BACKUP_EXCLUDES:
+        args += ["--exclude", pattern]
+    result = restic(cfg, *args)
+    if result.returncode not in (0, 3):  # 3: done, but some files couldn't be read
+        raise BackupError(f"backup failed: {restic_error(result)}")
+    summary = {}
+    for line in result.stdout.splitlines():
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if msg.get("message_type") == "summary":
+            summary = msg
+    if result.returncode == 3:
+        summary["unreadable"] = max(1, result.stderr.count('"message_type":"error"'))
+    keep = int(cfg.get("keep_last") or 0)
+    if keep > 0:
+        pruned = restic(cfg, "forget", "--tag", "omalocker", "--host", socket.gethostname(),
+                        "--keep-last", str(keep), "--prune")
+        if pruned.returncode != 0:
+            summary["forget_error"] = restic_error(pruned)
+    return summary
+
+
+def backup_age(state):
+    last = state.get("last_success")
+    if not last:
+        return None
+    return now() - datetime.datetime.fromisoformat(last)
+
+
+def describe_age(delta):
+    hours = int(delta.total_seconds() // 3600)
+    if hours < 1:
+        return "less than an hour ago"
+    if hours < 48:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    return f"{hours // 24} days ago"
+
+
+def cmd_backup(args):
+    try:
+        cfg = load_backup_config()
+    except BackupError as e:
+        print(f"omalocker: {e}", file=sys.stderr)
+        return 1
+    if cfg is None:
+        print("omalocker: backup isn't set up on this device. School IT puts the settings in "
+              "/etc/omalocker/backup.toml (see docs/backup.md).", file=sys.stderr)
+        return 1
+    locker = Path(args.locker or cfg.get("locker") or default_locker()).expanduser().resolve()
+    state = read_state()
+    age = backup_age(state)
+
+    if args.status:
+        print(f"Backup of {locker}")
+        print(f"  to {cfg['repository']} (settings: {cfg['path']})")
+        print(f"  last good backup: {describe_age(age) if age is not None else 'never'}"
+              + (f", snapshot {state.get('snapshot')}" if age is not None else ""))
+        if state.get("last_error"):
+            print(f"  last problem ({state.get('last_error_at', '?')}): {state['last_error']}")
+        try:
+            listed = restic(cfg, "snapshots", "--tag", "omalocker", "--json")
+            if listed.returncode == 0:
+                snaps = json.loads(listed.stdout or "[]")
+                print(f"  {len(snaps)} snapshot{'s' if len(snaps) != 1 else ''} in the repository")
+            else:
+                print(f"  can't list snapshots: {restic_error(listed)}")
+        except (BackupError, ValueError) as e:
+            print(f"  can't list snapshots: {e}")
+        return 0
+
+    every = datetime.timedelta(days=float(cfg["every_days"]))
+    if args.if_due and age is not None and age < every:
+        print(f"Last backup {describe_age(age)}; next one is due in "
+              f"{describe_age(every - age).replace(' ago', '')}.")
+        return 0
+    if not (locker / "Home.md").exists():
+        print(f"omalocker: no Locker at {locker}", file=sys.stderr)
+        return 1
+    try:
+        summary = backup_locker(cfg, locker)
+    except BackupError as e:
+        write_state(last_error=str(e), last_error_at=now().isoformat())
+        print(f"omalocker: {e}", file=sys.stderr)
+        return 1
+    write_state(last_success=now().isoformat(), snapshot=summary.get("snapshot_id", "")[:8],
+                files=summary.get("total_files_processed"), last_error=None, last_error_at=None)
+    print(f"Backed up {locker}: {summary.get('total_files_processed', '?')} files, "
+          f"snapshot {summary.get('snapshot_id', '?')[:8]}")
+    if summary.get("unreadable"):
+        print(f"  {summary['unreadable']} file(s) couldn't be read and aren't in this backup")
+    if summary.get("forget_error"):
+        print(f"  old snapshots weren't cleaned up: {summary['forget_error']}")
+    return 0
+
+
+def cmd_restore(args):
+    try:
+        cfg = load_backup_config()
+        if cfg is None:
+            raise BackupError("backup isn't set up on this device (see docs/backup.md)")
+        locker = Path(args.locker or cfg.get("locker") or default_locker()).expanduser()
+        if args.to:
+            dest = Path(args.to).expanduser()
+        elif not locker.exists() or not any(locker.iterdir()):
+            dest = locker
+        else:
+            raise BackupError(f"{locker} already has notes, so nothing was restored over it. "
+                              f"Restore next to it with --to ~/Locker-restored, compare, then swap.")
+        if dest.exists() and any(dest.iterdir()):
+            raise BackupError(f"{dest} isn't empty; pick a new folder")
+        listed = restic(cfg, "snapshots", "--tag", "omalocker", "--json")
+        if listed.returncode != 0:
+            raise BackupError(f"can't list snapshots: {restic_error(listed)}")
+        snaps = sorted(json.loads(listed.stdout or "[]"), key=lambda s: s.get("time", ""))
+        if args.snapshot:
+            snaps = [s for s in snaps if s.get("id", "").startswith(args.snapshot)
+                     or s.get("short_id") == args.snapshot]
+        if not snaps:
+            raise BackupError("no backup snapshot found")
+        snap = snaps[-1]
+        source = snap["paths"][0]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        scratch = dest.parent / f".omalocker-restore-{os.getpid()}"
+        try:
+            done = restic(cfg, "restore", snap["id"], "--target", str(scratch))
+            if done.returncode != 0:
+                raise BackupError(f"restore failed: {restic_error(done)}")
+            restored = scratch / source.lstrip("/")
+            if dest.exists():
+                dest.rmdir()
+            os.replace(restored, dest)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+    except (BackupError, ValueError, KeyError) as e:
+        print(f"omalocker: {e}", file=sys.stderr)
+        return 1
+    count = sum(1 for _ in dest.rglob("*") if _.is_file())
+    print(f"Restored snapshot {snap['id'][:8]} from {snap.get('time', '?')[:16]} "
+          f"({snap.get('hostname', '?')}) into {dest}: {count} files")
+    print(f"  check it: omalocker --locker {dest} doctor")
+    return 0
+
+
+def backup_problem(locker):
+    """A line for doctor when this Locker's backup is missing or late, else None."""
+    try:
+        cfg = load_backup_config()
+    except BackupError as e:
+        return f"backup settings: {e}"
+    if cfg is None:
+        return None
+    backed = Path(cfg.get("locker") or default_locker()).expanduser().resolve()
+    if backed != locker.resolve():
+        return None
+    state = read_state()
+    age = backup_age(state)
+    if age is None:
+        return "never backed up: run `omalocker backup`" + (
+            f" (last try: {state['last_error']})" if state.get("last_error") else "")
+    if age > datetime.timedelta(days=float(cfg["every_days"]) + 1):
+        return f"last good backup was {describe_age(age)}" + (
+            f"; last problem: {state['last_error']}" if state.get("last_error") else "")
+    return None
+
+
 # ---------------------------------------------------------------- doctor
 
 def is_class_folder(path):
@@ -1040,14 +1321,17 @@ def cmd_doctor(args):
                  "broken_links": broken if args.show_names else len(broken)}
         report.append(entry)
 
+    backup = backup_problem(locker)
     if args.json:
-        print(json.dumps({"locker": str(locker), "notes": len(notes), "issues": report},
-                         indent=2))
-        return 1 if report else 0
+        print(json.dumps({"locker": str(locker), "notes": len(notes), "issues": report,
+                          "backup": backup}, indent=2))
+        return 1 if report or backup else 0
     print(f"Checked {len(notes)} notes in {locker}")
+    if backup:
+        print(f"  backup: {backup}")
     if not report:
         print("  all good: every note has a type, valid frontmatter, and links that resolve")
-        return 0
+        return 1 if backup else 0
     for entry in report:
         print(f"\n  {entry['note']}")
         for p in entry["problems"]:
@@ -1087,6 +1371,17 @@ def main(argv=None):
     p = sub.add_parser("mastery", help="mastery graph per class: Mastery/ notes and graph.html")
     p.add_argument("--classes", help="OmaMastery folder (default ~/Classes)")
     p.set_defaults(func=cmd_mastery)
+
+    p = sub.add_parser("backup", help="encrypted backup of the Locker (restic)")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--if-due", action="store_true", help="only when the last good backup is due")
+    g.add_argument("--status", action="store_true", help="last backup and snapshot count")
+    p.set_defaults(func=cmd_backup)
+
+    p = sub.add_parser("restore", help="restore the Locker from backup; never overwrites")
+    p.add_argument("--to", help="folder to restore into (must be new or empty)")
+    p.add_argument("--snapshot", help="snapshot id (default: the newest)")
+    p.set_defaults(func=cmd_restore)
 
     p = sub.add_parser("doctor", help="check frontmatter, types, blocks and links")
     p.add_argument("--show-names", action="store_true",

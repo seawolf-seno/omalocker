@@ -5,7 +5,8 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 omalocker="$repo/bin/omalocker"
 export HOME=$(mktemp -d)
-unset OMALOCKER_LOCKER
+unset OMALOCKER_LOCKER OMALOCKER_NOW XDG_CONFIG_HOME XDG_STATE_HOME XDG_CACHE_HOME XDG_DATA_HOME
+export OMALOCKER_BACKUP_CONFIG="$HOME/backup.toml"   # never /etc or the real ~/.config
 trap 'chmod -R u+rwx "$HOME"; rm -rf "$HOME"' EXIT
 step() { printf '\n== %s\n' "$*"; }
 
@@ -37,6 +38,25 @@ fi
 
 step "omalocker doctor"
 "$omalocker" doctor
+
+step "Backup: back up, wipe the Locker, restore, check"
+restic_bin="${OMALOCKER_RESTIC:-$(command -v restic || true)}"
+if [ -z "$restic_bin" ] || ! "$restic_bin" version >/dev/null 2>&1; then
+  echo "skipped: restic isn't installed (pacman -S restic, or set OMALOCKER_RESTIC)"
+else
+  export OMALOCKER_RESTIC="$restic_bin"
+  head -c 32 /dev/urandom | base64 > "$HOME/backup-key"
+  printf 'repository = "%s/backup/{user}"\npassword_file = "%s/backup-key"\n' "$HOME" "$HOME" > "$OMALOCKER_BACKUP_CONFIG"
+  chmod -R u+r "$HOME/Locker/Classes"
+  "$omalocker" backup
+  "$omalocker" backup --if-due | grep -q "next one is due"
+  before=$(cd "$HOME/Locker" && find . -type f -print0 | sort -z | xargs -0 sha256sum)
+  rm -rf "$HOME/Locker"
+  "$omalocker" restore
+  after=$(cd "$HOME/Locker" && find . -type f -print0 | sort -z | xargs -0 sha256sum)
+  [ "$before" = "$after" ] || { echo "restored Locker differs" >&2; exit 1; }
+  "$omalocker" doctor
+fi
 
 step "omalocker doctor on the Phase 0 sample Locker"
 "$omalocker" --locker "$repo/fixtures/sample-locker" doctor

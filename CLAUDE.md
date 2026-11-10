@@ -31,5 +31,10 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
 - 2026-11-10: `omalocker mastery`: per-class graph (counts per level, no names) as
   `Mastery/` notes + offline `graph.html`; idea/joint level = each student's lowest. It is
   the only command that reads `mastery.csv` (agents still never open it).
-- Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); run init/import/mastery
-  on seno's machine; per-student graph comes with Phase 2 (levels pushed to students).
+- 2026-11-10: `omalocker backup` / `restore` (restic, settings in
+  `/etc/omalocker/backup.toml`, key passed as a file only); hourly `--if-due` systemd timer
+  in `systemd/`; doctor warns when a backup is missing or late. Tests need restic
+  (`OMALOCKER_RESTIC=...`; skipped without it). Tests clear XDG_* and OMALOCKER_* env.
+- Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
+- Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
+  `docs/plan.md` (backup key per person?); viewer app or pacos packaging.

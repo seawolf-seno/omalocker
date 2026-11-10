@@ -104,7 +104,7 @@ mastery levels), with no AI, so it shows the teacher's judgment and nothing gues
 | **PacTerminus** | Terminus → Locker | completion marker → a note in `Pathway/Milestones/` | VM: finish quest → milestone, visible in parent view |
 | **Omawrite + Omacanvas turn-in** | both ways | Omawrite saves to `Work/<class>/`; turn-in submits from there | Fictional account submits a Locker file |
 | **Canvas** | Canvas → Locker | OmaMastery setup's token: assignments → `Work/<class>/` stubs | Sandbox course |
-| **Backup** | device → school | Encrypted backup of the whole Locker every 2 days; school IT holds the key | Wipe the VM, restore, links intact |
+| **Backup** | device → school | `omalocker backup` (restic, encrypted) every 2 days via a systemd timer; school IT holds the key (`docs/backup.md`) | Built and tested: back up, wipe, restore, identical, `doctor` clean. Still to do: the same in the pacos VM against school storage |
 
 `make test-connections` builds a fictional school in a temp `HOME` and runs every flow,
 then `omalocker doctor` checks frontmatter, links, that each view holds only what its
@@ -160,10 +160,12 @@ rights normally move to the student at 18).
      desktop app with no account, installed by the school. Keep the reply on file.
      Teachers and staff can use it now. If Obsidian says no, students get an open-source
      editor (SilverBullet or Logseq) instead; the Locker files don't change.
-2. **Where the viewer runs** (a school server or a hosted service) and who keeps it running.
-3. **How people sign in**: school accounts for students and staff; parents need another way
+2. **Backup key: one per person or one for the school** (`docs/backup.md`). Recommended:
+   one per person, made at device setup and copied to IT.
+3. **Where the viewer runs** (a school server or a hosted service) and who keeps it running.
+4. **How people sign in**: school accounts for students and staff; parents need another way
    (for example an emailed link).
-4. **Where family and custody records come from** (for example the school's records in
+5. **Where family and custody records come from** (for example the school's records in
    Blackbaud), and who updates them when custody changes.
 
 ## Risks
