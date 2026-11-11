@@ -42,6 +42,27 @@ A student can share more on a single note (`share: [parent, teacher]`) or mark i
 marked private: grades, milestones and teacher notes about the student can't be hidden
 from parents.
 
+**Built: `omalocker views`** (2026-11-10) writes each view into
+`~/.local/state/omalocker/views/` (outside the Locker), one folder per audience
+(`parent/`, `advisor/`, `teacher/<class>/`, `activity/<activity>/`), each with a
+`view.json` (`as_of`, notes, and for parents which notes are on the first page). It
+rebuilds every view from scratch, so a note made private is gone on the next run; nothing
+is pushed yet (that waits for the viewer). How the rules above became filters:
+
+- "Tagged with a class/activity" = the note's properties link to it. Teachers and activity
+  leaders get that, the class/activity note itself, and `Me.md`.
+- `share: [teacher]` reaches the teachers of the classes the note links, or every teacher
+  if it links none. Same for `activity`.
+- `People/` notes go only to parents, unless the student shares them.
+- Never in any view: `private` notes, `AGENTS.md`, and notes about classmates
+  (`role: student`), since they hold another student's information. **To confirm (seno):**
+  the plan said parents see "everything"; this leaves classmates out.
+- `private` doesn't hide milestones or mastery; `doctor` says so on such a note.
+- `doctor` fails if a built view holds a note its audience can't see now, and notes when
+  views are older than the notes.
+- Not yet: attachments (non-Markdown files), course grades, objective-level mastery on a
+  student device (only teachers' devices have objective notes today).
+
 **Viewer (decided): OmaLocker's own viewer app, fully separate from Formation Pathways**
 (seno, 2026-11-10). No connection to FP at all: OmaLocker doesn't use FP's logins, its
 family records, or its database, and FP sends nothing into a Locker. The viewer needs its

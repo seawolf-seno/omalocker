@@ -8,6 +8,7 @@ Python stdlib only. See docs/format.md for the note format.
   omalocker mastery
   omalocker backup [--if-due | --status]
   omalocker restore [--to DIR] [--snapshot ID]
+  omalocker views [--out DIR]
   omalocker doctor [--show-names] [--json]
 
 Never opens roster.toml or notes.md in a class folder. Only `mastery` reads
@@ -1165,6 +1166,229 @@ def backup_problem(locker):
     return None
 
 
+# ---------------------------------------------------------------- views
+#
+# A view is the part of a student's Locker one audience may see (docs/plan.md,
+# "Views: who sees what"). Views are built here, on the device, into a folder
+# outside the Locker; only views ever leave the device.
+
+VIEW_FORMAT = 1
+# The parent view opens on these (plus Me.md); everything else is one click away.
+PARENT_SUMMARY = {"class", "mastery", "milestone", "pathway"}
+# Not the student's own writing: share: [private] doesn't hide them.
+CANT_HIDE = {"milestone", "mastery", "objective"}
+ADVISOR_TYPES = {"class", "idea", "joint", "mastery", "activity", "pathway", "milestone"}
+
+
+class ViewError(Exception):
+    pass
+
+
+def views_dir():
+    if os.environ.get("OMALOCKER_VIEWS"):
+        return Path(os.environ["OMALOCKER_VIEWS"])
+    state_home = Path(os.environ.get("XDG_STATE_HOME") or home() / ".local" / "state")
+    return state_home / "omalocker" / "views"
+
+
+def load_notes(locker):
+    """(notes, skipped): notes as [(rel, props, text)]; skipped counts notes
+    whose frontmatter can't be read, which go in no view."""
+    notes, skipped = [], 0
+    for rel in locker_files(locker)[0]:
+        try:
+            text = (locker / rel).read_text(encoding="utf-8")
+            lines, _ = split_note(text)
+            props = parse_props(lines) if lines is not None else None
+        except (OSError, UnicodeDecodeError, FormatError):
+            props = None
+        if not props or not props.get("type"):
+            skipped += 1
+            continue
+        notes.append((rel, props, text))
+    return notes, skipped
+
+
+def share_of(props):
+    share = props.get("share") or []
+    return [str(s) for s in (share if isinstance(share, list) else [share])]
+
+
+def linked_names(props):
+    """Lowercased note names this note's properties link to."""
+    names = set()
+    for v in props.values():
+        for item in v if isinstance(v, list) else [v]:
+            t = link_target(item) if item else None
+            if t:
+                names.add(t.lower().rsplit("/", 1)[-1].removesuffix(".md"))
+    return names
+
+
+def plan_views(notes):
+    """{(audience, scope): {rel: summary}} for a student's notes."""
+    me = next((p for rel, p, _ in notes if rel == Path("Me.md")), None)
+    if me is None:
+        raise ViewError("no Me.md: views are built from a student's Locker")
+    if me.get("role") != "student":
+        raise ViewError(f"Me.md has role {me.get('role') or '(none)'}; views are built "
+                        "only from a student's Locker (role: student)")
+    classes = sorted(rel.stem for rel, p, _ in notes
+                     if p.get("type") == "class" and rel.parent == Path("Classes"))
+    activities = sorted(rel.stem for rel, p, _ in notes if p.get("type") == "activity")
+    views = {("parent", None): {}, ("advisor", None): {}}
+    views.update({("teacher", c): {} for c in classes})
+    views.update({("activity", a): {} for a in activities})
+
+    for rel, props, _ in notes:
+        kind, share = props.get("type"), share_of(props)
+        is_me = rel == Path("Me.md")
+        if kind == "guide":
+            continue  # AGENTS.md: rules for agents, not about the student
+        if kind == "person" and not is_me and props.get("role") == "student":
+            continue  # classmates: another student's information, never in a view
+        if "private" in share and kind not in CANT_HIDE:
+            continue
+        views[("parent", None)][rel] = is_me or kind in PARENT_SUMMARY
+        # People/ notes go only to parents unless the student shares them.
+        person = kind == "person" and not is_me
+        links = linked_names(props)
+        if "advisor" in share or (not person and (is_me or kind in ADVISOR_TYPES)):
+            views[("advisor", None)][rel] = True
+        for aud, names, own_type in (("teacher", classes, "class"),
+                                     ("activity", activities, "activity")):
+            # share: [teacher] reaches the teachers of the classes the note links,
+            # or every teacher when it links none (same for activity leaders).
+            to_all = aud in share and not any(n.lower() in links for n in names)
+            for name in names:
+                own = kind == own_type and rel.stem == name
+                tagged = name.lower() in links and (aud in share or not person)
+                if own or tagged or to_all:
+                    views[(aud, name)][rel] = True
+    return views
+
+
+def view_path(root, audience, scope):
+    return root / audience / scope if scope else root / audience
+
+
+def build_views(locker, out):
+    """Rebuild every view from scratch, then swap it in, so a note that is now
+    private or untagged is gone from the views. Returns (plan, skipped, as_of)."""
+    notes, skipped = load_notes(locker)
+    plan = plan_views(notes)
+    texts = {rel: text for rel, _, text in notes}
+    kinds = {rel: p.get("type") for rel, p, _ in notes}
+    as_of = now().isoformat(timespec="seconds")
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    new, old = out.with_name(out.name + ".new"), out.with_name(out.name + ".old")
+    for leftover in (new, old):
+        if leftover.exists():
+            shutil.rmtree(leftover)
+    new.mkdir(mode=0o700)
+    for (audience, scope), entries in plan.items():
+        folder = view_path(new, audience, scope)
+        folder.mkdir(parents=True, exist_ok=True)
+        for rel in sorted(entries):
+            dest = folder / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(texts[rel], encoding="utf-8")
+        manifest = {
+            "format": VIEW_FORMAT, "audience": audience, "scope": scope, "as_of": as_of,
+            "omalocker": VERSION,
+            "notes": [{"path": rel.as_posix(), "type": kinds[rel], "summary": entries[rel]}
+                      for rel in sorted(entries)],
+        }
+        (folder / "view.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    # Local only, never part of a view: which Locker these views came from.
+    (new / ".omalocker.json").write_text(
+        json.dumps({"locker": str(locker.resolve()), "as_of": as_of}) + "\n")
+    if out.exists():
+        os.replace(out, old)
+    os.replace(new, out)
+    if old.exists():
+        shutil.rmtree(old)
+    return plan, skipped, as_of
+
+
+def read_view_files(folder):
+    files = {}
+    for root, _, names in os.walk(folder):
+        for name in names:
+            path = Path(root, name)
+            rel = path.relative_to(folder)
+            if rel != Path("view.json"):
+                files[rel] = path
+    return files
+
+
+def views_problem(locker):
+    """(leak, stale) lines for doctor about this Locker's views, or (None, None).
+    leak: a view holds a note its audience can't see now. stale: out of date."""
+    out = views_dir()
+    try:
+        meta = json.loads((out / ".omalocker.json").read_text())
+    except (OSError, ValueError):
+        return None, None
+    if Path(meta.get("locker", "")) != locker.resolve():
+        return None, None
+    notes, _ = load_notes(locker)
+    try:
+        plan = plan_views(notes)
+    except ViewError:
+        plan = {}
+    texts = {rel: text for rel, _, text in notes}
+    expected = {view_path(out, a, s): entries for (a, s), entries in plan.items()}
+    built = [Path(r) for r, _, names in os.walk(out) if "view.json" in names]
+    leaked, stale = 0, False
+    for folder in built:
+        entries = expected.get(folder)
+        files = read_view_files(folder)
+        if entries is None:
+            leaked += len(files)  # a view for an audience that's gone
+            continue
+        for rel, path in files.items():
+            if rel not in entries:
+                leaked += 1
+            elif path.read_text(encoding="utf-8", errors="replace") != texts[rel]:
+                stale = True
+        if set(entries) - set(files):
+            stale = True
+    if set(expected) - set(built):
+        stale = True
+    leak = (f"views hold {leaked} note{'s' if leaked != 1 else ''} their audience can't "
+            "see now: run `omalocker views`") if leaked else None
+    return leak, (f"views are older than the notes (as of {meta.get('as_of')}): "
+                  "run `omalocker views`" if stale and not leak else None)
+
+
+def cmd_views(args):
+    locker = Path(args.locker or default_locker()).expanduser()
+    if not locker.is_dir():
+        print(f"omalocker: no Locker at {locker}", file=sys.stderr)
+        return 1
+    out = Path(args.out).expanduser() if args.out else views_dir()
+    if out.resolve() == locker.resolve() or locker.resolve() in out.resolve().parents:
+        print("omalocker: views go outside the Locker", file=sys.stderr)
+        return 1
+    try:
+        plan, skipped, as_of = build_views(locker, out)
+    except ViewError as e:
+        print(f"omalocker: {e}", file=sys.stderr)
+        return 1
+    print(f"Views as of {as_of} in {out}")
+    for (audience, scope), entries in plan.items():
+        label = f"{audience}: {scope}" if scope else audience
+        summary = sum(entries.values())
+        extra = f" ({summary} on the first page)" if audience == "parent" else ""
+        print(f"  {label}: {len(entries)} notes{extra}")
+    if skipped:
+        print(f"  {skipped} note{'s' if skipped > 1 else ''} left out of every view: "
+              "frontmatter can't be read (run `omalocker doctor`)")
+    return 0
+
+
 # ---------------------------------------------------------------- doctor
 
 def is_class_folder(path):
@@ -1244,6 +1468,8 @@ def check_note(rel, text, index):
                 problems.append(f"share has unknown audience {', '.join(map(str, bad))}")
             if "private" in share and len(share) > 1:
                 problems.append("share: private can't be combined with other audiences")
+            if "private" in share and kind in CANT_HIDE:
+                problems.append(f"share: [private] doesn't hide a {kind} note from parents")
     if "private" in props:
         problems.append("private: true is replaced by share: [private]")
 
@@ -1322,16 +1548,20 @@ def cmd_doctor(args):
         report.append(entry)
 
     backup = backup_problem(locker)
+    leak, stale = views_problem(locker)
+    failed = bool(report or backup or leak)
     if args.json:
         print(json.dumps({"locker": str(locker), "notes": len(notes), "issues": report,
-                          "backup": backup}, indent=2))
-        return 1 if report or backup else 0
+                          "backup": backup, "views": leak or stale}, indent=2))
+        return 1 if failed else 0
     print(f"Checked {len(notes)} notes in {locker}")
     if backup:
         print(f"  backup: {backup}")
+    if leak or stale:
+        print(f"  views: {leak or stale}")
     if not report:
         print("  all good: every note has a type, valid frontmatter, and links that resolve")
-        return 1 if backup else 0
+        return 1 if failed else 0
     for entry in report:
         print(f"\n  {entry['note']}")
         for p in entry["problems"]:
@@ -1382,6 +1612,10 @@ def main(argv=None):
     p.add_argument("--to", help="folder to restore into (must be new or empty)")
     p.add_argument("--snapshot", help="snapshot id (default: the newest)")
     p.set_defaults(func=cmd_restore)
+
+    p = sub.add_parser("views", help="build each audience's view of a student's Locker")
+    p.add_argument("--out", help="views folder (default ~/.local/state/omalocker/views)")
+    p.set_defaults(func=cmd_views)
 
     p = sub.add_parser("doctor", help="check frontmatter, types, blocks and links")
     p.add_argument("--show-names", action="store_true",

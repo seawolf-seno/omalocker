@@ -61,4 +61,20 @@ fi
 step "omalocker doctor on the Phase 0 sample Locker"
 "$omalocker" --locker "$repo/fixtures/sample-locker" doctor
 
+step "Student: views per audience from a copy of the sample Locker"
+student="$HOME/student-locker"
+cp -r "$repo/fixtures/sample-locker" "$student"
+"$omalocker" --locker "$student" views
+views="$HOME/.local/state/omalocker/views"
+for v in parent advisor "teacher/Biology" "activity/Cross Country"; do
+  test -f "$views/$v/view.json"
+done
+if grep -rq "summer lab" "$views"; then
+  echo "a private note reached a view" >&2; exit 1
+fi
+if find "$views" -name "Jules Marchetti.md" | grep -q .; then
+  echo "a classmate's note reached a view" >&2; exit 1
+fi
+"$omalocker" --locker "$student" doctor
+
 printf '\nAll connections pass.\n'

@@ -41,7 +41,8 @@ A Locker is a folder (`~/Locker`) of Markdown notes with YAML frontmatter (Obsid
 
 Any note may add `share`, always a list: `[private]` (owner only), or extra audiences
 (`parent`, `teacher`, `advisor`, `activity`) on top of the defaults in `docs/plan.md`.
-`private` can't be combined with other audiences.
+`private` can't be combined with other audiences. `omalocker views` applies these rules; `private` doesn't hide
+`milestone`, `mastery` or `objective` notes from parents.
 
 `source` marks notes an app created. Apps rewrite only their own block, plus the
 properties they own (for `omalocker import classes`: a class note's `course`, `block`,

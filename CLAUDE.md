@@ -35,6 +35,10 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
   `/etc/omalocker/backup.toml`, key passed as a file only); hourly `--if-due` systemd timer
   in `systemd/`; doctor warns when a backup is missing or late. Tests need restic
   (`OMALOCKER_RESTIC=...`; skipped without it). Tests clear XDG_* and OMALOCKER_* env.
+- 2026-11-10: `omalocker views` (student Lockers only): per-audience views in
+  `~/.local/state/omalocker/views/` with `view.json` (`as_of`); rebuilt from scratch each run;
+  doctor fails on a view holding a note its audience can't see. Not pushed anywhere yet.
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
-  `docs/plan.md` (backup key per person?); viewer app or pacos packaging.
+  `docs/plan.md` (backup key per person?); confirm classmates are left out of parent views; viewer app
+  (receives the views) or pacos packaging.

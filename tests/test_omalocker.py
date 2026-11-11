@@ -463,5 +463,123 @@ class Doctor(Env):
         self.assertEqual(code, 0, issues)
 
 
+class Views(Env):
+    """Views from the fictional Phase 0 sample (a sophomore's Locker)."""
+
+    def setUp(self):
+        super().setUp()
+        shutil.copytree(REPO / "fixtures" / "sample-locker", self.locker)
+        os.environ["OMALOCKER_NOW"] = "2026-11-10T20:00:00+00:00"
+        self.out = self.tmp / ".local" / "state" / "omalocker" / "views"
+
+    def build(self):
+        code, out, err = self.run_cli("views")
+        self.assertEqual(code, 0, err)
+        return out
+
+    def view(self, *parts):
+        folder = self.out.joinpath(*parts)
+        return {n["path"]: n for n in json.loads((folder / "view.json").read_text())["notes"]}
+
+    def edit(self, rel, old, new):
+        path = self.locker / rel
+        path.write_text(path.read_text().replace(old, new, 1))
+
+    def test_parent_sees_all_but_private_agents_and_classmates(self):
+        self.build()
+        parent = self.view("parent")
+        for rel in ("Inbox/ask about summer labs.md", "AGENTS.md", "People/Jules Marchetti.md"):
+            self.assertNotIn(rel, parent)
+        for rel in ("Journal/2026-11-10.md", "People/Mr. Okafor.md", "Home.md",
+                    "Work/Biology/Lab report - yeast respiration.md"):
+            self.assertIn(rel, parent)
+            self.assertFalse(parent[rel]["summary"])
+        for rel in ("Me.md", "Classes/Biology.md", "Mastery/Biology.md",
+                    "Pathway/Goals 2026-27.md",
+                    "Pathway/Milestones/2026-11-08 League finals.md"):
+            self.assertTrue(parent[rel]["summary"], rel)
+        manifest = json.loads((self.out / "parent" / "view.json").read_text())
+        self.assertEqual(manifest["as_of"], "2026-11-10T20:00:00+00:00")
+        self.assertEqual((self.out / "parent" / "Me.md").read_text(), self.note("Me.md"))
+
+    def test_teacher_sees_their_class(self):
+        self.build()
+        bio = self.view("teacher", "Biology")
+        self.assertEqual(sorted(bio), [
+            "Classes/Biology.md", "Ideas/Cellular respiration.md",
+            "Ideas/Feedback loops in ecosystems.md", "Ideas/Systems and feedback.md",
+            "Journal/2026-11-10.md", "Mastery/Biology.md", "Me.md",
+            "Work/Biology/Lab report - yeast respiration.md"])
+        # share: [teacher] on a note tagged English 10 reaches only that teacher.
+        self.assertIn("Work/English 10/Personal essay draft.md", self.view("teacher", "English 10"))
+        self.assertNotIn("Work/English 10/Personal essay draft.md", self.view("teacher", "Geometry"))
+
+    def test_share_with_no_class_reaches_every_teacher(self):
+        (self.locker / "Inbox" / "question.md").write_text(
+            "---\ntype: inbox\nshare: [teacher]\n---\nA question.\n")
+        self.build()
+        for c in ("Biology", "English 10", "Geometry", "Theology 10"):
+            self.assertIn("Inbox/question.md", self.view("teacher", c))
+        self.assertNotIn("Inbox/question.md", self.view("advisor"))
+
+    def test_advisor_and_activity(self):
+        self.build()
+        adv = self.view("advisor")
+        self.assertIn("Pathway/Goals 2026-27.md", adv)
+        self.assertIn("Activities/Robotics Club.md", adv)
+        self.assertIn("Ideas/Systems and feedback.md", adv)
+        for rel in adv:
+            self.assertFalse(rel.startswith(("Journal/", "Work/", "People/", "Inbox/")), rel)
+        xc = self.view("activity", "Cross Country")
+        self.assertEqual(sorted(xc), [
+            "Activities/Cross Country.md", "Journal/2026-11-09.md", "Me.md",
+            "Pathway/Milestones/2026-11-08 League finals.md"])
+
+    def test_private_note_leaves_every_view_on_rebuild(self):
+        self.build()
+        self.assertIn("Journal/2026-11-10.md", self.view("teacher", "Biology"))
+        self.edit("Journal/2026-11-10.md", "type: journal", "type: journal\nshare: [private]")
+        self.build()
+        for p in self.out.rglob("*.md"):
+            self.assertNotEqual(p.name, "2026-11-10.md", p)
+        self.assertFalse(self.out.with_name("views.old").exists())
+
+    def test_private_does_not_hide_milestones_from_parents(self):
+        rel = "Pathway/Milestones/2026-11-08 League finals.md"
+        self.edit(rel, "type: milestone", "type: milestone\nshare: [private]")
+        self.build()
+        self.assertIn(rel, self.view("parent"))
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("doesn't hide a milestone note from parents", out)
+
+    def test_only_student_lockers(self):
+        self.edit("Me.md", "role: student", "role: teacher")
+        code, _, err = self.run_cli("views")
+        self.assertEqual(code, 1)
+        self.assertIn("only from a student's Locker", err)
+        self.assertFalse(self.out.exists())
+
+    def test_doctor_finds_leaks_and_stale_views(self):
+        self.build()
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 0, out)
+        self.edit("Me.md", "# Me", "# Me, edited")
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 0, out)
+        self.assertIn("views are older than the notes", out)
+        self.build()
+        shutil.copy(self.locker / "Inbox" / "ask about summer labs.md",
+                    self.out / "advisor" / "leak.md")
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("views hold 1 note their audience can't see", out)
+
+    def test_views_go_outside_the_locker(self):
+        code, _, err = self.run_cli("views", "--out", str(self.locker / "views"))
+        self.assertEqual(code, 1)
+        self.assertIn("outside the Locker", err)
+
+
 if __name__ == "__main__":
     unittest.main()
