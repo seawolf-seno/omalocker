@@ -1,5 +1,18 @@
-# Only the viewer goes to Vercel. Fixtures, tests, the template and the device CLI stay here.
-/*
-!/api
-!/viewer
-!/vercel.json
+# Only the viewer goes to Vercel (api/, viewer/, vercel.json).
+# Fixtures, tests, the template and the device CLI stay here.
+bin
+docs
+fixtures
+systemd
+template
+tests
+Makefile
+README.md
+CLAUDE.md
+LICENSE
+.fizzy.yaml
+**/__pycache__
+# Never upload local secrets or Vercel's local folder.
+.env*
+.vercel
+.python-version

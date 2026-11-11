@@ -25,7 +25,26 @@ Still open (see `docs/plan.md`, decisions still open 3–5):
   `docs/graduation.md`.
 - Not built yet: the teacher → student levels flow, attachments, rate limits.
 
-## On Vercel with Turso (decided 2026-11-10; code ready, not deployed)
+## On Vercel with Turso (live on staging since 2026-11-10)
+
+Staging: **https://omalocker-viewer.vercel.app** (Vercel project `omalocker-viewer` in
+srsuchard's projects; Turso database `omalocker-viewer-staging` from Vercel's Marketplace,
+which set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` on the project and in `.env.local`).
+Fictional people only: Rowan Teague (student), parent@example.org (primary custody),
+okafor@example.org (teacher, Biology). Run admin commands against it with
+`(set -a; . ./.env.local; set +a; viewer/omalocker-viewer <command>)`.
+
+Things Vercel needs that aren't obvious:
+- `api/index.py` must declare `class handler(...)` literally; Vercel finds Python functions
+  by reading the source, and `handler = something()` isn't found (the whole project then
+  deploys as static files, source included).
+- `vercel.json` uses `routes`, not `rewrites`: routes send every path to the function before
+  static files are checked, so nothing in the repo is ever served as a file.
+- `.vercelignore` excludes `.env*` and `.vercel`; a local `vercel build` otherwise bundles
+  `.env.local` (the database token).
+- `vercel build` writes `pyproject.toml` and `uv.lock`; they're in `.gitignore`.
+- Runtime: Python 3.14.
+
 
 - **Code:** `api/index.py` loads `viewer/omalocker-viewer` and hands Vercel its `handler`
   class (Vercel's Python runtime takes a `BaseHTTPRequestHandler`). `vercel.json` sends every

@@ -53,7 +53,9 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
   https://claude.ai/artifact/A7hdqunn4MX26qXwHgMUa9 (fictional; built from real pages).
 - 2026-11-10: viewer ready for Vercel + Turso (seno chose Turso): stdlib Turso HTTP client,
   settings in the DB, `api/index.py` + `vercel.json` + `.vercelignore`; tests run local and
-  through `tests/fake_turso.py`. Vercel CLI/plugin/MCP set up (account srsuchard). Not deployed.
+  through `tests/fake_turso.py`. Vercel CLI/plugin/MCP set up (account srsuchard).
+- 2026-11-10: staging live: https://omalocker-viewer.vercel.app (Turso via Vercel Marketplace;
+  fictional people; sign-in, role checks, push, audit verified live). Gotchas in docs/viewer.md.
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
   `docs/plan.md` (backup key, where the viewer runs, parent sign-in, custody records);

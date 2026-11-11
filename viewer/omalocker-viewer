@@ -1168,13 +1168,13 @@ def make_server(target, host, port):
     return server
 
 
-def vercel_handler():
-    """The request handler class for Vercel's Python runtime (api/index.py).
-    Settings and data come from Turso: TURSO_DATABASE_URL and TURSO_AUTH_TOKEN."""
+def vercel_viewer():
+    """The Viewer for Vercel's Python runtime (api/index.py). Settings and data come
+    from Turso: TURSO_DATABASE_URL and TURSO_AUTH_TOKEN."""
     target = os.environ.get("OMALOCKER_VIEWER_DB") or os.environ.get("TURSO_DATABASE_URL")
     if not target:
         raise ViewerError("set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN")
-    return type("handler", (Handler,), {"viewer": Viewer(target)})
+    return Viewer(target)
 
 
 # ---------------------------------------------------------------- admin CLI
