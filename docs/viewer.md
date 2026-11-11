@@ -139,6 +139,7 @@ omalocker-viewer grant parent --person parent1@example.org --student rowan@stude
 omalocker-viewer grant teacher --person okafor@example.org --student rowan@student.example.org --scope Biology
 omalocker-viewer push-token rowan@student.example.org     # shown once
 omalocker-viewer sign-in-link parent1@example.org         # valid 15 minutes, once
+omalocker-viewer sign-in-link parent1@example.org --hours 48   # staging only: a demo link to email (max 72)
 omalocker-viewer serve                                    # 127.0.0.1:8380
 omalocker-viewer list
 ```

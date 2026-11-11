@@ -44,6 +44,7 @@ CANT_HIDE = {"milestone", "mastery", "objective"}  # same as bin/omalocker
 TEST_DOMAIN = re.compile(r"(^|\.)(example|test|invalid|example\.(com|org|net))$")
 
 SIGN_IN_TTL = 15 * 60
+MAX_DEMO_HOURS = 72
 SESSION_TTL = 30 * 24 * 3600
 MAX_PUSH = 32 * 1024 * 1024
 MAX_NOTE = 1024 * 1024
@@ -1072,7 +1073,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "No password needed.</p><form method=\"post\" action=\"/signin\">"
                     f'<input type="hidden" name="t" value="{esc(token)}">'
                     '<button class="big">Open OmaLocker</button></form>'
-                    '<p class="muted">This link works once, for 15 minutes. You stay signed in '
+                    '<p class="muted">This link works once. You stay signed in '
                     "on this phone for 30 days.</p>")
             return self.send(200, page(v.cfg, "Sign in", body))
         person = v.session_person(self.headers.get("Cookie"))
@@ -1260,11 +1261,23 @@ def cmd_grant(args, revoke=False):
 def cmd_sign_in_link(args):
     cfg, db = open_admin(args)
     person = person_by_email(db, args.email)
+    ttl = SIGN_IN_TTL
+    if args.hours is not None:
+        # Longer links are for showing staging (fictional people) to someone, by email.
+        if cfg["env"] != "staging":
+            raise ViewerError("--hours is for staging only; real sign-in links last 15 minutes")
+        if not 0 < args.hours <= MAX_DEMO_HOURS:
+            raise ViewerError(f"--hours must be between 1 and {MAX_DEMO_HOURS}")
+        ttl = args.hours * 3600
     token = secrets.token_urlsafe(32)
     db.execute("INSERT INTO sign_in VALUES (?, ?, ?)",
-               (digest(token), person["id"], clock() + SIGN_IN_TTL))
-    audit(db, cli_actor(), "sign-in-link", detail=person["email"])
+               (digest(token), person["id"], clock() + ttl))
+    audit(db, cli_actor(), "sign-in-link", detail=person["email"]
+          + (f" valid {args.hours}h" if args.hours else ""))
     print(f"{cfg['base_url']}/signin?t={token}")
+    if args.hours:
+        print(f"Works once, for {args.hours} hours. Whoever taps its button first is signed "
+              "in, so don't open it yourself.", file=sys.stderr)
     return 0
 
 
@@ -1465,6 +1478,9 @@ def main(argv=None):
 
     p = sub.add_parser("sign-in-link", help="print a one-time sign-in link")
     p.add_argument("email")
+    p.add_argument("--hours", type=int,
+                   help=f"staging only: keep the link valid this long (1-{MAX_DEMO_HOURS}), "
+                        "to send a demo by email")
     p.set_defaults(func=cmd_sign_in_link)
 
     p = sub.add_parser("push-token", help="make a student device's push token")

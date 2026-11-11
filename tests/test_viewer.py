@@ -251,6 +251,33 @@ class Viewer(unittest.TestCase):
         finally:
             vw.clock = real_clock
 
+    def test_demo_link_lasts_the_hours_asked_on_staging_only(self):
+        def token_of(link):
+            return urllib.parse.parse_qs(urllib.parse.urlsplit(link).query)["t"][0]
+        real_clock = vw.clock
+        try:
+            link = self.admin("sign-in-link", PEOPLE["parent"], "--hours", "48").strip()
+            vw.clock = lambda: real_clock() + 47 * 3600
+            self.post(self.browser(), "/signin", {"t": token_of(link)}, expect=303)
+            vw.clock = real_clock
+            link = self.admin("sign-in-link", PEOPLE["parent"], "--hours", "48").strip()
+            vw.clock = lambda: real_clock() + 49 * 3600
+            self.post(self.browser(), "/signin", {"t": token_of(link)}, expect=400)
+        finally:
+            vw.clock = real_clock
+        code, err = self.admin("sign-in-link", PEOPLE["parent"], "--hours", "100", ok=False)
+        self.assertEqual(code, 1)
+        self.assertIn("between 1 and 72", err)
+        self.assertIn("valid 48h", json.dumps(self.audit_log()))
+        db = vw.connect(self.target)
+        try:
+            db.execute("UPDATE settings SET value = 'production' WHERE key = 'env'")
+        finally:
+            db.close()
+        code, err = self.admin("sign-in-link", PEOPLE["parent"], "--hours", "48", ok=False)
+        self.assertEqual(code, 1)
+        self.assertIn("staging only", err)
+
     def test_sign_out_ends_the_session(self):
         self.push()
         parent = self.browser("parent")
