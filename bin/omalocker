@@ -9,6 +9,7 @@ Python stdlib only. See docs/format.md for the note format.
   omalocker backup [--if-due | --status]
   omalocker restore [--to DIR] [--snapshot ID]
   omalocker views [--out DIR]
+  omalocker push
   omalocker doctor [--show-names] [--json]
 
 Never opens roster.toml or notes.md in a class folder. Only `mastery` reads
@@ -27,6 +28,7 @@ import socket
 import subprocess
 import sys
 import tomllib
+import urllib.parse
 from pathlib import Path
 
 VERSION = "0.1.0"
@@ -1389,6 +1391,78 @@ def cmd_views(args):
     return 0
 
 
+def viewer_config():
+    """{url, token_file} for pushing views, or None when not set up."""
+    if os.environ.get("OMALOCKER_VIEWER_CONFIG"):
+        paths = [Path(os.environ["OMALOCKER_VIEWER_CONFIG"])]
+    else:
+        config_home = Path(os.environ.get("XDG_CONFIG_HOME") or home() / ".config")
+        paths = [config_home / "omalocker" / "viewer.toml", Path("/etc/omalocker/viewer.toml")]
+    for path in paths:
+        if path.exists():
+            with open(path, "rb") as f:
+                cfg = tomllib.load(f)
+            if not cfg.get("url") or not cfg.get("token_file"):
+                raise ViewError(f"{path} needs url and token_file")
+            return cfg
+    return None
+
+
+def push_views(cfg, out):
+    import urllib.error
+    import urllib.request
+    url = str(cfg["url"]).rstrip("/") + "/api/push"
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https" and parts.hostname not in ("localhost", "127.0.0.1", "::1"):
+        raise ViewError("the viewer url must be https:// (student data never goes out unencrypted)")
+    token = Path(str(cfg["token_file"])).expanduser().read_text().strip()
+    views = []
+    for manifest_path in sorted(out.rglob("view.json")):
+        folder = manifest_path.parent
+        manifest = json.loads(manifest_path.read_text())
+        for n in manifest["notes"]:
+            n["text"] = (folder / n["path"]).read_text(encoding="utf-8")
+        views.append(manifest)
+    body = json.dumps({"format": VIEW_FORMAT, "views": views}).encode()
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read()).get("error")
+        except ValueError:
+            msg = None
+        raise ViewError(f"the viewer said {e.code}: {msg or e.reason}")
+    except urllib.error.URLError as e:
+        raise ViewError(f"can't reach the viewer: {e.reason}")
+
+
+def cmd_push(args):
+    locker = Path(args.locker or default_locker()).expanduser()
+    if not locker.is_dir():
+        print(f"omalocker: no Locker at {locker}", file=sys.stderr)
+        return 1
+    try:
+        cfg = viewer_config()
+        if cfg is None:
+            print("omalocker: the viewer isn't set up on this device "
+                  "(/etc/omalocker/viewer.toml; see docs/viewer.md)", file=sys.stderr)
+            return 1
+        out = views_dir()
+        _, skipped, as_of = build_views(locker, out)
+        result = push_views(cfg, out)
+    except (ViewError, OSError) as e:
+        print(f"omalocker: {e}", file=sys.stderr)
+        return 1
+    print(f"Pushed {result['views']} views ({result['notes']} notes) as of {as_of}")
+    if skipped:
+        print(f"  {skipped} note{'s' if skipped > 1 else ''} left out: frontmatter can't be read "
+              "(run `omalocker doctor`)")
+    return 0
+
+
 # ---------------------------------------------------------------- doctor
 
 def is_class_folder(path):
@@ -1616,6 +1690,9 @@ def main(argv=None):
     p = sub.add_parser("views", help="build each audience's view of a student's Locker")
     p.add_argument("--out", help="views folder (default ~/.local/state/omalocker/views)")
     p.set_defaults(func=cmd_views)
+
+    p = sub.add_parser("push", help="build the views and send them to the viewer")
+    p.set_defaults(func=cmd_push)
 
     p = sub.add_parser("doctor", help="check frontmatter, types, blocks and links")
     p.add_argument("--show-names", action="store_true",

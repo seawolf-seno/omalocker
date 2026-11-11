@@ -21,9 +21,17 @@ from Formation Pathways.
 | `omalocker backup [--if-due \| --status]` | Encrypted backup of the whole Locker with restic, to the school storage set in `/etc/omalocker/backup.toml`. A systemd timer (`systemd/`) runs `--if-due` hourly; it backs up every 2 days. See `docs/backup.md` |
 | `omalocker restore [--to DIR]` | Restores the newest backup into a missing or empty `~/Locker`, or a new folder. Never writes over notes |
 | `omalocker views [--out DIR]` | On a student's Locker: builds each audience's view (parent, advisor, each teacher, each activity leader) in `~/.local/state/omalocker/views/`, filtered by `type`, linked classes/activities and `share`. Private notes, `AGENTS.md` and notes about classmates are never in a view. See `docs/plan.md` |
+| `omalocker push` | Builds the views and sends them to the viewer set in `/etc/omalocker/viewer.toml` (https only) |
 | `omalocker doctor` | Checks every note: frontmatter, `type`, `share`, where it lives, blocks, links; and that the backup isn't missing or late. Hides `People/` notes and link targets unless `--show-names` |
+
+## Viewer (`viewer/omalocker-viewer`)
+
+OmaLocker's own app where parents, teachers, advisors and activity leaders open the views
+they're allowed to see. One stdlib Python file (SQLite, behind a TLS proxy): one-time
+sign-in links, family records with primary custody, grants, a role check on every page.
+Staging only for now. See `docs/viewer.md`.
 
 `make test` runs the unit tests (backup tests need `restic`, or `OMALOCKER_RESTIC=/path/to/restic`); `make test-connections` builds a fictional school in a temp
 `HOME` and runs every connection built so far.
 
-Status: Phase 1 commands built (init, import classes, mastery, doctor), encrypted backup/restore, and per-audience views on the device. Next: the viewer app (logins, family records, role checks) to receive the views, or packaging in pacos.
+Status: Phase 1 commands built (init, import classes, mastery, doctor), encrypted backup/restore, per-audience views on the device, and a first viewer (staging, fictional people). Next: emailed sign-in links, family records from the school's records, graduation; or packaging in pacos.

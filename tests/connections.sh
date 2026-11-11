@@ -77,4 +77,41 @@ if find "$views" -name "Jules Marchetti.md" | grep -q .; then
 fi
 "$omalocker" --locker "$student" doctor
 
+step "Viewer (staging): fictional people, push from the student's device, role checks"
+viewer="$repo/viewer/omalocker-viewer"
+export OMALOCKER_VIEWER_DATA="$HOME/viewer" OMALOCKER_VIEWER_QUIET=1
+port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
+base="http://127.0.0.1:$port"
+"$viewer" init --env staging --base-url "$base"
+"$viewer" person add --name "Rowan Teague" --email rowan@student.example.org --student --grad-year 2029
+"$viewer" person add --name "Parent One" --email parent1@example.org
+"$viewer" person add --name "Parent Two" --email parent2@example.org
+"$viewer" person add --name "Mr. Okafor" --email okafor@example.org
+"$viewer" grant parent --person parent1@example.org --student rowan@student.example.org --primary-custody
+"$viewer" grant parent --person parent2@example.org --student rowan@student.example.org
+"$viewer" grant teacher --person okafor@example.org --student rowan@student.example.org --scope Biology
+"$viewer" push-token rowan@student.example.org 2>/dev/null > "$HOME/push-key"
+printf 'url = "%s"\ntoken_file = "%s/push-key"\n' "$base" "$HOME" > "$HOME/viewer.toml"
+export OMALOCKER_VIEWER_CONFIG="$HOME/viewer.toml"
+"$viewer" serve --port "$port" & viewer_pid=$!
+trap 'kill $viewer_pid 2>/dev/null; chmod -R u+rwx "$HOME"; rm -rf "$HOME"' EXIT
+for _ in $(seq 50); do curl -s -o /dev/null "$base/" && break; sleep 0.1; done
+"$omalocker" --locker "$student" push
+sign_in() {  # sign in as $1 with a fresh link; cookie jar in $HOME/$1.jar
+  local token
+  token=$("$viewer" sign-in-link "$1" | sed 's/.*t=//')
+  curl -s -o /dev/null -c "$HOME/$1.jar" --data-urlencode "t=$token" "$base/signin"
+}
+code() { curl -s -o /dev/null -w '%{http_code}' -b "$HOME/$1.jar" "$base$2"; }
+sign_in parent1@example.org; sign_in parent2@example.org; sign_in okafor@example.org
+[ "$(code parent1@example.org /s/1/parent/)" = 200 ]
+[ "$(code parent2@example.org /s/1/parent/)" = 404 ]   # no primary custody
+[ "$(code okafor@example.org /s/1/teacher/Biology/)" = 200 ]
+[ "$(code okafor@example.org /s/1/teacher/Geometry/)" = 404 ]
+[ "$(code okafor@example.org /s/1/parent/)" = 404 ]
+if curl -s -b "$HOME/parent1@example.org.jar" "$base/s/1/parent/?all=1" | grep -q "summer labs"; then
+  echo "a private note reached the viewer" >&2; exit 1
+fi
+echo "role checks pass: custodial parent, non-custodial parent, teacher"
+
 printf '\nAll connections pass.\n'

@@ -47,7 +47,7 @@ from parents.
 (`parent/`, `advisor/`, `teacher/<class>/`, `activity/<activity>/`), each with a
 `view.json` (`as_of`, notes, and for parents which notes are on the first page). It
 rebuilds every view from scratch, so a note made private is gone on the next run; nothing
-is pushed yet (that waits for the viewer). How the rules above became filters:
+is sent until the student's device runs `omalocker push` (to the viewer, `docs/viewer.md`). How the rules above became filters:
 
 - "Tagged with a class/activity" = the note's properties link to it. Teachers and activity
   leaders get that, the class/activity note itself, and `Me.md`.
@@ -55,8 +55,8 @@ is pushed yet (that waits for the viewer). How the rules above became filters:
   if it links none. Same for `activity`.
 - `People/` notes go only to parents, unless the student shares them.
 - Never in any view: `private` notes, `AGENTS.md`, and notes about classmates
-  (`role: student`), since they hold another student's information. **To confirm (seno):**
-  the plan said parents see "everything"; this leaves classmates out.
+  (`role: student`), since they hold another student's information (seno, 2026-11-10:
+  classmates stay out, parents included).
 - `private` doesn't hide milestones or mastery; `doctor` says so on such a note.
 - `doctor` fails if a built view holds a note its audience can't see now, and notes when
   views are older than the notes.
@@ -117,7 +117,7 @@ mastery levels), with no AI, so it shows the teacher's judgment and nothing gues
 |---|---|---|---|
 | **OmaMastery** (`~/Classes`) | Teacher device | Class folders live in the teacher's Locker; `ideas.toml`/`plan.toml` → `Classes/`, `Ideas/` notes; levels → mastery graph | Sample classes import; graph renders; `roster.toml`/`mastery.csv` never read by agents |
 | **Teacher → student levels** | via the viewer | Teacher pushes a class's levels; the student's Locker pulls its own into `Mastery/<class>.md` | Fictional class: a level change reaches the student and the parent view |
-| **OmaLocker viewer** | Device → viewer (views only) | View files per audience; the viewer checks each person's role and, for parents, primary custody | **Staging only**: fictional student, parent (primary and non-custodial), teacher logins each see the right view, or none |
+| **OmaLocker viewer** | Device → viewer (views only) | `omalocker push` sends the views; the viewer checks each person's role and, for parents, primary custody (`docs/viewer.md`) | Built and tested on a local staging viewer: fictional custodial and non-custodial parent, teacher, advisor, activity leader and admin each see the right view, or none. Still to do: a real staging host |
 | **Formation Pathways** | none | No connection, either way | Confirm OmaLocker sends nothing to FP and reads nothing from it |
 | **Grades → system of record** | unchanged | Existing path, not touched | Confirm OmaLocker sends no grades anywhere new |
 | **OmaClass** (Veyon) | Classes → Locker | `room` → class note property | Room shows on class note |
@@ -161,6 +161,8 @@ views, login and family records from the viewer, and their backups from school s
    servers (the viewer and backups).
 7. **Viewer:** OmaLocker's own app, fully separate from Formation Pathways (no shared
    logins, records or data, and no pathway copy from FP).
+8. **Classmates:** a student's notes about classmates go in no view, the parent view
+   included.
 
 Leadership and counsel should still confirm 3–5 against FERPA before the pilot (FERPA
 rights normally move to the student at 18).

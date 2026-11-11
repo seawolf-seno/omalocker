@@ -1,0 +1,981 @@
+#!/usr/bin/env python3
+"""omalocker-viewer: shows each person the views of a student's Locker they may see.
+
+Python stdlib only (sqlite3 + http.server; put TLS in front, e.g. Caddy).
+It stores views only, never the Locker itself: each student's device builds and
+pushes them (`omalocker push`). Every page checks the signed-in person against
+the student before showing anything. See docs/viewer.md.
+
+  omalocker-viewer init --env staging|production --base-url URL
+  omalocker-viewer person add --name NAME --email EMAIL [--student --grad-year Y] [--admin]
+  omalocker-viewer grant parent|teacher|advisor|activity --person EMAIL --student EMAIL
+                   [--scope CLASS_OR_ACTIVITY] [--primary-custody]
+  omalocker-viewer revoke parent|teacher|advisor|activity --person EMAIL --student EMAIL [--scope X]
+  omalocker-viewer sign-in-link EMAIL
+  omalocker-viewer push-token STUDENT_EMAIL
+  omalocker-viewer list
+  omalocker-viewer serve [--host 127.0.0.1] [--port 8380]
+"""
+
+import argparse
+import hashlib
+import html
+import http.server
+import json
+import os
+import re
+import secrets
+import sqlite3
+import sys
+import threading
+import time
+import tomllib
+import urllib.parse
+from http import HTTPStatus
+from pathlib import Path
+
+VERSION = "0.1.0"
+AUDIENCES = ("parent", "advisor", "teacher", "activity")
+SCOPED = {"teacher", "activity"}
+CANT_HIDE = {"milestone", "mastery", "objective"}  # same as bin/omalocker
+# Staging holds fictional people only: reserved test domains (RFC 2606/6761).
+TEST_DOMAIN = re.compile(r"(^|\.)(example|test|invalid|example\.(com|org|net))$")
+
+SIGN_IN_TTL = 15 * 60
+SESSION_TTL = 12 * 3600
+MAX_PUSH = 32 * 1024 * 1024
+MAX_NOTE = 1024 * 1024
+COOKIE = "olv_session"
+
+clock = time.time  # tests replace this
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS people (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  is_student INTEGER NOT NULL DEFAULT 0,
+  grad_year INTEGER,
+  is_admin INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS grants (
+  person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+  student_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+  audience TEXT NOT NULL,
+  scope TEXT NOT NULL DEFAULT '',
+  primary_custody INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (person_id, student_id, audience, scope)
+);
+CREATE TABLE IF NOT EXISTS push_tokens (
+  token_hash TEXT PRIMARY KEY,
+  student_id INTEGER NOT NULL UNIQUE REFERENCES people(id) ON DELETE CASCADE,
+  created REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sign_in (
+  token_hash TEXT PRIMARY KEY,
+  person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+  expires REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash TEXT PRIMARY KEY,
+  person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+  expires REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS views (
+  student_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+  audience TEXT NOT NULL,
+  scope TEXT NOT NULL DEFAULT '',
+  as_of TEXT NOT NULL,
+  pushed REAL NOT NULL,
+  PRIMARY KEY (student_id, audience, scope)
+);
+CREATE TABLE IF NOT EXISTS notes (
+  student_id INTEGER NOT NULL,
+  audience TEXT NOT NULL,
+  scope TEXT NOT NULL DEFAULT '',
+  path TEXT NOT NULL,
+  type TEXT,
+  summary INTEGER NOT NULL DEFAULT 0,
+  text TEXT NOT NULL,
+  PRIMARY KEY (student_id, audience, scope, path),
+  FOREIGN KEY (student_id, audience, scope)
+    REFERENCES views(student_id, audience, scope) ON DELETE CASCADE
+);
+"""
+
+
+class ViewerError(Exception):
+    pass
+
+
+def digest(token):
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+# ---------------------------------------------------------------- storage
+
+def data_dir(arg=None):
+    return Path(arg or os.environ.get("OMALOCKER_VIEWER_DATA") or "/var/lib/omalocker-viewer")
+
+
+def load_config(data):
+    path = data / "config.toml"
+    if not path.exists():
+        raise ViewerError(f"no {path}: run `omalocker-viewer init` first")
+    with open(path, "rb") as f:
+        cfg = tomllib.load(f)
+    if cfg.get("env") not in ("staging", "production"):
+        raise ViewerError(f"{path}: env must be staging or production")
+    cfg.setdefault("secure_cookies", True)
+    cfg["base_url"] = str(cfg.get("base_url", "")).rstrip("/")
+    return cfg
+
+
+def connect(data):
+    db = sqlite3.connect(data / "viewer.db", isolation_level=None, timeout=10)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA foreign_keys = ON")
+    db.execute("PRAGMA journal_mode = WAL")
+    db.executescript(SCHEMA)
+    return db
+
+
+def check_email(cfg, email):
+    email = email.strip()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise ViewerError(f"not an email address: {email!r}")
+    test = bool(TEST_DOMAIN.search(email.rsplit("@", 1)[1].lower()))
+    if cfg["env"] == "staging" and not test:
+        raise ViewerError("staging holds fictional people only: use an address at "
+                          "example.org, *.example or *.test")
+    if cfg["env"] == "production" and test:
+        raise ViewerError("production doesn't take test addresses")
+    return email
+
+
+def person_by_email(db, email):
+    row = db.execute("SELECT * FROM people WHERE email = ?", (email.strip(),)).fetchone()
+    if not row:
+        raise ViewerError(f"no person with email {email}")
+    return row
+
+
+# ---------------------------------------------------------------- who sees what
+
+def allowed_views(db, person):
+    """[(student row, audience, scope)] this person may open."""
+    rows = db.execute(
+        """SELECT g.audience, g.scope, s.* FROM grants g
+           JOIN people s ON s.id = g.student_id
+           WHERE g.person_id = ? AND (g.audience != 'parent' OR g.primary_custody = 1)
+           ORDER BY s.name, g.audience, g.scope""", (person["id"],)).fetchall()
+    seen = [(r, r["audience"], r["scope"]) for r in rows]
+    if person["is_admin"]:  # admin: same as parent, for every student (docs/plan.md)
+        have = {s["id"] for s, a, _ in seen if a == "parent"}
+        for s in db.execute("SELECT * FROM people WHERE is_student = 1 ORDER BY name"):
+            if s["id"] not in have:
+                seen.append((s, "parent", ""))
+    return seen
+
+
+def can_see(db, person, student_id, audience, scope):
+    if audience not in AUDIENCES:
+        return False
+    if audience == "parent" and person["is_admin"]:
+        return db.execute("SELECT 1 FROM people WHERE id = ? AND is_student = 1",
+                          (student_id,)).fetchone() is not None
+    row = db.execute(
+        """SELECT primary_custody FROM grants WHERE person_id = ? AND student_id = ?
+           AND audience = ? AND scope = ?""",
+        (person["id"], student_id, audience, scope)).fetchone()
+    return bool(row) and (audience != "parent" or bool(row["primary_custody"]))
+
+
+# ---------------------------------------------------------------- push
+
+def frontmatter(text):
+    """type, role and share from a note's frontmatter: just enough to re-check."""
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return {}
+    props, key = {}, None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        m = re.match(r"([A-Za-z_][\w-]*):\s*(.*)$", line)
+        if m:
+            key, value = m.group(1), m.group(2).strip()
+            if value.startswith("[") and value.endswith("]"):
+                props[key] = [v.strip().strip("'\"") for v in value[1:-1].split(",") if v.strip()]
+            elif value:
+                props[key] = value.strip("'\"")
+            else:
+                props[key] = []
+        elif key and re.match(r"\s+-\s*", line) and isinstance(props.get(key), list):
+            props[key].append(re.sub(r"^\s+-\s*", "", line).strip().strip("'\""))
+    return props
+
+
+def note_refused(path, text):
+    """Why this note can't be in any view, or None. The device already filters;
+    this is the viewer refusing to hold what it never should."""
+    props = frontmatter(text)
+    kind = props.get("type")
+    share = props.get("share") or []
+    share = share if isinstance(share, list) else [share]
+    if kind == "guide" or path == "AGENTS.md":
+        return "AGENTS.md is never in a view"
+    if "private" in share and kind not in CANT_HIDE:
+        return "a private note"
+    if kind == "person" and path != "Me.md" and props.get("role") == "student":
+        return "a note about a classmate"
+    return None
+
+
+def clean_path(path):
+    if not isinstance(path, str) or not path.endswith(".md") or len(path) > 300:
+        return None
+    parts = path.split("/")
+    if path.startswith("/") or any(p in ("", ".", "..") or p.startswith(".") for p in parts):
+        return None
+    if any(c in path for c in "\\\0\r\n"):
+        return None
+    return path
+
+
+def accept_push(db, student_id, payload):
+    """Replace every view of this student with the pushed ones. Returns a summary."""
+    views = payload.get("views") if isinstance(payload, dict) else None
+    if not isinstance(views, list) or not views:
+        raise ViewerError("push has no views")
+    rows, seen = [], set()
+    for v in views:
+        audience, scope = v.get("audience"), v.get("scope") or ""
+        if audience not in AUDIENCES:
+            raise ViewerError(f"unknown audience {audience!r}")
+        if (audience in SCOPED) != bool(scope):
+            raise ViewerError(f"{audience} views {'need' if audience in SCOPED else 'have no'} scope")
+        if not isinstance(scope, str) or len(scope) > 200 or "/" in scope or scope.startswith("."):
+            raise ViewerError("bad scope")
+        if (audience, scope) in seen:
+            raise ViewerError(f"view {audience} {scope} sent twice")
+        seen.add((audience, scope))
+        as_of = v.get("as_of")
+        if not isinstance(as_of, str) or len(as_of) > 40:
+            raise ViewerError("every view needs as_of")
+        notes, paths = [], set()
+        for n in v.get("notes") or []:
+            path, text = clean_path(n.get("path")), n.get("text")
+            if path is None or not isinstance(text, str) or path in paths:
+                raise ViewerError("bad note path or text")
+            if len(text.encode()) > MAX_NOTE:
+                raise ViewerError(f"a note is over {MAX_NOTE // 1024} KB")
+            why = note_refused(path, text)
+            if why:
+                raise ViewerError(f"refused: the {audience} view holds {why}")
+            paths.add(path)
+            notes.append((path, str(n.get("type") or ""), 1 if n.get("summary") else 0, text))
+        rows.append((audience, scope, as_of, notes))
+    pushed = clock()
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute("DELETE FROM views WHERE student_id = ?", (student_id,))
+        for audience, scope, as_of, notes in rows:
+            db.execute("INSERT INTO views VALUES (?, ?, ?, ?, ?)",
+                       (student_id, audience, scope, as_of, pushed))
+            db.executemany("INSERT INTO notes VALUES (?, ?, ?, ?, ?, ?, ?)",
+                           [(student_id, audience, scope, *n) for n in notes])
+        db.execute("COMMIT")
+    except BaseException:
+        db.execute("ROLLBACK")
+        raise
+    return {"views": len(rows), "notes": sum(len(r[3]) for r in rows)}
+
+
+# ---------------------------------------------------------------- markdown
+#
+# A small, safe renderer: everything is escaped first; only the shapes below
+# become HTML. Student-written text never reaches the page as markup.
+
+LINK_RE = re.compile(r"!?\[\[([^\]|#^]*)(?:[#^][^\]|]*)?(?:\|([^\]]*))?\]\]")
+MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+
+
+def inline(text, resolve):
+    """text is raw; returns HTML."""
+    out, pos = [], 0
+    for m in LINK_RE.finditer(text):
+        out.append(inline_plain(text[pos:m.start()]))
+        target, alias = m.group(1).strip(), m.group(2)
+        label = html.escape((alias or target).strip())
+        href = resolve(target)
+        out.append(f'<a href="{html.escape(href)}">{label}</a>' if href
+                   else f'<span class="unlinked">{label}</span>')
+        pos = m.end()
+    out.append(inline_plain(text[pos:]))
+    return "".join(out)
+
+
+def inline_plain(text):
+    parts = re.split(r"(`[^`]+`)", text)
+    out = []
+    for part in parts:
+        if len(part) > 1 and part.startswith("`") and part.endswith("`"):
+            out.append(f"<code>{html.escape(part[1:-1])}</code>")
+            continue
+        links = []
+
+        def keep(m):
+            links.append(f'<a href="{html.escape(m.group(2))}" rel="noopener noreferrer">'
+                         f'{html.escape(m.group(1))}</a>')
+            return f"\0{len(links) - 1}\0"
+        s = html.escape(MD_LINK_RE.sub(keep, part))
+        s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
+        s = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"<em>\1</em>", s)
+        s = re.sub(r"\0(\d+)\0", lambda m: links[int(m.group(1))], s)
+        out.append(s)
+    return "".join(out)
+
+
+def split_front(text):
+    lines = text.split("\n")
+    if lines and lines[0].strip() == "---":
+        for i, line in enumerate(lines[1:], 1):
+            if line.strip() == "---":
+                return lines[1:i], "\n".join(lines[i + 1:])
+    return [], text
+
+
+def render_markdown(text, resolve):
+    front, body = split_front(text)
+    body = re.sub(r"<!--.*?-->", "", body, flags=re.S)
+    out = []
+    if front:
+        out.append('<table class="props">')
+        props = frontmatter("---\n" + "\n".join(front) + "\n---")
+        for key, value in props.items():
+            values = value if isinstance(value, list) else [value]
+            cell = ", ".join(inline(str(v), resolve) for v in values)
+            out.append(f"<tr><th>{html.escape(key)}</th><td>{cell}</td></tr>")
+        out.append("</table>")
+    lines, i, para = body.split("\n"), 0, []
+
+    def flush():
+        if para:
+            out.append("<p>" + inline(" ".join(para), resolve) + "</p>")
+            para.clear()
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            flush()
+            code, i = [], i + 1
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                code.append(lines[i])
+                i += 1
+            out.append("<pre><code>" + html.escape("\n".join(code)) + "</code></pre>")
+            i += 1
+            continue
+        m = re.match(r"(#{1,6})\s+(.*)", stripped)
+        if m:
+            flush()
+            n = len(m.group(1))
+            out.append(f"<h{n}>{inline(m.group(2), resolve)}</h{n}>")
+        elif re.match(r"([-*+]|\d+[.)])\s+", stripped):
+            flush()
+            ordered = bool(re.match(r"\d", stripped))
+            tag = "ol" if ordered else "ul"
+            items = []
+            while i < len(lines) and re.match(r"\s*([-*+]|\d+[.)])\s+", lines[i]):
+                item = re.sub(r"^\s*([-*+]|\d+[.)])\s+", "", lines[i])
+                box = re.match(r"\[([ xX])\]\s*(.*)", item)
+                if box:
+                    mark = "☑" if box.group(1) != " " else "☐"
+                    items.append(f"<li>{mark} {inline(box.group(2), resolve)}</li>")
+                else:
+                    items.append(f"<li>{inline(item, resolve)}</li>")
+                i += 1
+            out.append(f"<{tag}>" + "".join(items) + f"</{tag}>")
+            continue
+        elif stripped.startswith("|"):
+            flush()
+            rows = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                if not all(re.fullmatch(r":?-+:?", c) for c in cells if c):
+                    rows.append(cells)
+                i += 1
+            if rows:
+                head = "".join(f"<th>{inline(c, resolve)}</th>" for c in rows[0])
+                body_rows = "".join(
+                    "<tr>" + "".join(f"<td>{inline(c, resolve)}</td>" for c in r) + "</tr>"
+                    for r in rows[1:])
+                out.append(f"<table><thead><tr>{head}</tr></thead><tbody>{body_rows}</tbody></table>")
+            continue
+        elif stripped.startswith(">"):
+            flush()
+            quote = []
+            while i < len(lines) and lines[i].strip().startswith(">"):
+                quote.append(lines[i].strip()[1:].strip())
+                i += 1
+            out.append("<blockquote>" + inline(" ".join(quote), resolve) + "</blockquote>")
+            continue
+        elif not stripped:
+            flush()
+        else:
+            para.append(stripped)
+        i += 1
+    flush()
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------- pages
+
+STYLE = """
+:root{--bg:#fbfaf7;--fg:#1d1d1b;--muted:#6b6a64;--line:#e3e0d8;--accent:#2f5d8a;--warn:#8a4b00;--card:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#161614;--fg:#e9e7e1;--muted:#a19e95;--line:#33322e;--accent:#8db6e0;--warn:#e0a35c;--card:#1e1e1b}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,sans-serif}
+main{max-width:46rem;margin:0 auto;padding:1.5rem 1rem 4rem}
+a{color:var(--accent)}
+header.top{display:flex;justify-content:space-between;align-items:center;gap:1rem;
+  border-bottom:1px solid var(--line);padding:.75rem 1rem}
+header.top form{margin:0}
+.staging{background:var(--warn);color:var(--bg);text-align:center;font-weight:600;padding:.25rem}
+.asof{color:var(--muted);font-size:.9rem}
+.unlinked{color:var(--muted)}
+table{border-collapse:collapse;margin:1rem 0;width:100%}
+th,td{border:1px solid var(--line);padding:.35rem .6rem;text-align:left;vertical-align:top}
+table.props th{width:9rem;color:var(--muted);font-weight:500}
+pre{background:var(--card);border:1px solid var(--line);padding:.75rem;overflow-x:auto}
+blockquote{border-left:3px solid var(--line);margin:1rem 0;padding-left:1rem;color:var(--muted)}
+ul.views li,ul.notes li{margin:.25rem 0}
+h2{margin-top:2rem}
+button{font:inherit;padding:.4rem .9rem;border:1px solid var(--line);background:var(--card);
+  color:var(--fg);border-radius:6px;cursor:pointer}
+"""
+
+AUDIENCE_LABEL = {"parent": "Family view", "advisor": "Advisor view",
+                  "teacher": "Teacher view", "activity": "Activity view"}
+TYPE_ORDER = ["person", "class", "mastery", "objective", "milestone", "pathway", "work",
+              "journal", "idea", "joint", "activity", "home", "inbox"]
+
+
+def esc(s):
+    return html.escape(str(s))
+
+
+def q(s):
+    return urllib.parse.quote(str(s), safe="")
+
+
+def view_url(student_id, audience, scope):
+    return f"/s/{student_id}/{audience}/" + (f"{q(scope)}/" if scope else "")
+
+
+def page(cfg, title, body, person=None):
+    staging = '<div class="staging">STAGING: fictional people only</div>' \
+        if cfg["env"] == "staging" else ""
+    who = ""
+    if person:
+        who = (f'<span>{esc(person["name"])}</span>'
+               '<form method="post" action="/signout"><button>Sign out</button></form>')
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<title>{esc(title)} · OmaLocker</title>'
+            f'<link rel="stylesheet" href="/style.css"></head><body>{staging}'
+            f'<header class="top"><a href="/">OmaLocker</a>{who}</header>'
+            f'<main>{body}</main></body></html>')
+
+
+class Viewer:
+    def __init__(self, data):
+        self.data = data
+        self.cfg = load_config(data)
+        self._local = threading.local()
+        connect(data).close()
+
+    @property
+    def db(self):
+        # One connection per server thread: transactions don't mix.
+        if getattr(self._local, "db", None) is None:
+            self._local.db = connect(self.data)
+        return self._local.db
+
+    def close_thread_db(self):
+        db = getattr(self._local, "db", None)
+        if db is not None:
+            db.close()
+            self._local.db = None
+
+    # -- sessions
+    def session_person(self, cookie_header):
+        if not cookie_header:
+            return None
+        token = None
+        for part in cookie_header.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == COOKIE:
+                token = value
+        if not token:
+            return None
+        return self.db.execute(
+            """SELECT p.* FROM sessions s JOIN people p ON p.id = s.person_id
+               WHERE s.token_hash = ? AND s.expires > ?""",
+            (digest(token), clock())).fetchone()
+
+    def sign_in(self, token):
+        """Use a sign-in link once. Returns a new session token, or None."""
+        h = digest(token or "")
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.db.execute("SELECT * FROM sign_in WHERE token_hash = ?", (h,)).fetchone()
+            self.db.execute("DELETE FROM sign_in WHERE token_hash = ? OR expires <= ?",
+                            (h, clock()))
+            if not row or row["expires"] <= clock():
+                self.db.execute("COMMIT")
+                return None
+            session = secrets.token_urlsafe(32)
+            self.db.execute("DELETE FROM sessions WHERE expires <= ?", (clock(),))
+            self.db.execute("INSERT INTO sessions VALUES (?, ?, ?)",
+                            (digest(session), row["person_id"], clock() + SESSION_TTL))
+            self.db.execute("COMMIT")
+            return session
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
+
+    def sign_out(self, cookie_header):
+        for part in (cookie_header or "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == COOKIE:
+                self.db.execute("DELETE FROM sessions WHERE token_hash = ?", (digest(value),))
+
+    def push_student(self, auth_header):
+        m = re.fullmatch(r"Bearer ([\w-]{20,200})", (auth_header or "").strip())
+        if not m:
+            return None
+        row = self.db.execute("SELECT student_id FROM push_tokens WHERE token_hash = ?",
+                              (digest(m.group(1)),)).fetchone()
+        return row["student_id"] if row else None
+
+    # -- pages
+    def home_page(self, person):
+        views = allowed_views(self.db, person)
+        if not views:
+            body = ("<h1>Nothing to show yet</h1><p>No student's Locker is shared with you. "
+                    "If that's wrong, ask the school office.</p>")
+            return page(self.cfg, "Home", body, person)
+        by_student = {}
+        for s, audience, scope in views:
+            by_student.setdefault(s["id"], (s, []))[1].append((audience, scope))
+        parts = ["<h1>Lockers you can see</h1>"]
+        for s, entries in by_student.values():
+            items = []
+            for audience, scope in entries:
+                v = self.db.execute(
+                    "SELECT as_of FROM views WHERE student_id = ? AND audience = ? AND scope = ?",
+                    (s["id"], audience, scope)).fetchone()
+                label = AUDIENCE_LABEL[audience] + (f": {esc(scope)}" if scope else "")
+                when = (f' <span class="asof">as of {esc(v["as_of"])}</span>' if v
+                        else ' <span class="asof">not shared from the device yet</span>')
+                items.append(f'<li><a href="{view_url(s["id"], audience, scope)}">{label}</a>{when}</li>')
+            parts.append(f'<h2>{esc(s["name"])}</h2><ul class="views">{"".join(items)}</ul>')
+        return page(self.cfg, "Home", "".join(parts), person)
+
+    def view_header(self, student, audience, scope, v):
+        label = AUDIENCE_LABEL[audience] + (f": {esc(scope)}" if scope else "")
+        return (f'<p><a href="/">← All Lockers</a></p><h1>{esc(student["name"])}</h1>'
+                f'<p>{label} · <span class="asof">as of {esc(v["as_of"])}, from the '
+                f"student's device</span></p>")
+
+    def index_page(self, person, student, audience, scope, show_all):
+        v = self.db.execute(
+            "SELECT * FROM views WHERE student_id = ? AND audience = ? AND scope = ?",
+            (student["id"], audience, scope)).fetchone()
+        if not v:
+            body = (f'<p><a href="/">← All Lockers</a></p><h1>{esc(student["name"])}</h1>'
+                    "<p>This view hasn't been shared from the student's device yet.</p>")
+            return page(self.cfg, student["name"], body, person)
+        notes = self.db.execute(
+            """SELECT path, type, summary FROM notes WHERE student_id = ? AND audience = ?
+               AND scope = ? ORDER BY path""", (student["id"], audience, scope)).fetchall()
+        first_page = audience == "parent" and not show_all
+        shown = [n for n in notes if n["summary"]] if first_page else notes
+        groups = {}
+        for n in shown:
+            groups.setdefault(n["type"] or "other", []).append(n)
+        base = view_url(student["id"], audience, scope)
+        parts = [self.view_header(student, audience, scope, v)]
+        for kind in sorted(groups, key=lambda k: (TYPE_ORDER.index(k) if k in TYPE_ORDER
+                                                 else len(TYPE_ORDER), k)):
+            items = "".join(
+                f'<li><a href="{base}n/{"/".join(q(p) for p in n["path"].split("/"))}">'
+                f'{esc(n["path"].removesuffix(".md"))}</a></li>' for n in groups[kind])
+            parts.append(f'<h2>{esc(kind.capitalize())}</h2><ul class="notes">{items}</ul>')
+        if first_page and len(notes) > len(shown):
+            parts.append(f'<p><a href="{base}?all=1">Show everything ({len(notes)} notes)</a></p>')
+        elif audience == "parent" and show_all:
+            parts.append(f'<p><a href="{base}">Back to the overview</a></p>')
+        return page(self.cfg, student["name"], "".join(parts), person)
+
+    def note_page(self, person, student, audience, scope, path):
+        v = self.db.execute(
+            "SELECT * FROM views WHERE student_id = ? AND audience = ? AND scope = ?",
+            (student["id"], audience, scope)).fetchone()
+        note = self.db.execute(
+            """SELECT * FROM notes WHERE student_id = ? AND audience = ? AND scope = ?
+               AND path = ?""", (student["id"], audience, scope, path)).fetchone() if v else None
+        if not note:
+            return None
+        paths = [r["path"] for r in self.db.execute(
+            "SELECT path FROM notes WHERE student_id = ? AND audience = ? AND scope = ?",
+            (student["id"], audience, scope))]
+        by_name = {}
+        for p in paths:
+            stem = p.removesuffix(".md")
+            by_name.setdefault(stem.lower(), p)
+            by_name.setdefault(stem.rsplit("/", 1)[-1].lower(), p)
+        base = view_url(student["id"], audience, scope)
+
+        def resolve(target):
+            p = by_name.get(target.strip().lower().removesuffix(".md"))
+            return f'{base}n/{"/".join(q(x) for x in p.split("/"))}' if p else None
+
+        body = (self.view_header(student, audience, scope, v)
+                + f'<p><a href="{base}">← Back to the view</a></p>'
+                + f'<article><p class="asof">{esc(path)}</p>'
+                + render_markdown(note["text"], resolve) + "</article>")
+        return page(self.cfg, path.rsplit("/", 1)[-1].removesuffix(".md"), body, person)
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    server_version = "omalocker-viewer"
+    sys_version = ""
+    viewer = None  # set by make_server
+
+    def log_message(self, fmt, *args):
+        # No paths in logs: they can hold student and note names.
+        if os.environ.get("OMALOCKER_VIEWER_QUIET"):
+            return
+        sys.stderr.write(f"{self.log_date_time_string()} {self.command} {args[1] if len(args) > 1 else ''}\n")
+
+    def send(self, status, body=b"", ctype="text/html; charset=utf-8", headers=()):
+        if isinstance(body, str):
+            body = body.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy",
+                         "default-src 'none'; style-src 'self'; img-src 'self'; "
+                         "form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+        for k, v in headers:
+            self.send_header(k, v)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def not_found(self, person=None):
+        v = self.viewer
+        self.send(404, page(v.cfg, "Not found", "<h1>Not found</h1>"
+                            '<p>This page doesn\'t exist, or isn\'t shared with you.</p>'
+                            '<p><a href="/">Home</a></p>', person))
+
+    def redirect(self, where, headers=()):
+        self.send(303, b"", headers=[("Location", where), *headers])
+
+    def cookie(self, value, max_age):
+        secure = "; Secure" if self.viewer.cfg["secure_cookies"] else ""
+        return ("Set-Cookie", f"{COOKIE}={value}; Max-Age={max_age}; Path=/; HttpOnly; "
+                              f"SameSite=Strict{secure}")
+
+    def read_body(self, limit):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if length < 0 or length > limit:
+            return None
+        return self.rfile.read(length)
+
+    def finish(self):
+        try:
+            super().finish()
+        finally:
+            self.viewer.close_thread_db()
+
+    def do_HEAD(self):
+        self.do_GET()
+
+    def do_GET(self):
+        v = self.viewer
+        url = urllib.parse.urlsplit(self.path)
+        query = urllib.parse.parse_qs(url.query)
+        if url.path == "/style.css":
+            return self.send(200, STYLE, "text/css; charset=utf-8")
+        if url.path == "/signin":
+            token = (query.get("t") or [""])[0]
+            body = ("<h1>Sign in</h1><p>This link works once and expires 15 minutes after "
+                    "it was sent.</p><form method=\"post\" action=\"/signin\">"
+                    f'<input type="hidden" name="t" value="{esc(token)}">'
+                    "<button>Sign in</button></form>")
+            return self.send(200, page(v.cfg, "Sign in", body))
+        person = v.session_person(self.headers.get("Cookie"))
+        if url.path == "/":
+            if not person:
+                body = ("<h1>OmaLocker</h1><p>Sign in with the link the school sent you. "
+                        "Need a new one? Ask the school office.</p>")
+                return self.send(200, page(v.cfg, "Sign in", body))
+            return self.send(200, v.home_page(person))
+        if not person:
+            return self.redirect("/")
+        parts = [urllib.parse.unquote(p) for p in url.path.split("/")[1:]]
+        if len(parts) < 3 or parts[0] != "s" or not parts[1].isdigit():
+            return self.not_found(person)
+        student_id, audience, rest = int(parts[1]), parts[2], parts[3:]
+        scope = ""
+        if audience in SCOPED:
+            if not rest or not rest[0]:
+                return self.not_found(person)
+            scope, rest = rest[0], rest[1:]
+        if rest and rest[-1] == "":
+            rest = rest[:-1]
+        if not can_see(v.db, person, student_id, audience, scope):
+            return self.not_found(person)
+        student = v.db.execute("SELECT * FROM people WHERE id = ?", (student_id,)).fetchone()
+        if not rest:
+            return self.send(200, v.index_page(person, student, audience, scope,
+                                               bool(query.get("all"))))
+        if rest[0] == "n" and len(rest) > 1:
+            html_page = v.note_page(person, student, audience, scope, "/".join(rest[1:]))
+            if html_page:
+                return self.send(200, html_page)
+        return self.not_found(person)
+
+    def do_POST(self):
+        v = self.viewer
+        path = urllib.parse.urlsplit(self.path).path
+        if path == "/api/push":
+            student_id = v.push_student(self.headers.get("Authorization"))
+            if student_id is None:
+                return self.send(401, json.dumps({"error": "bad push token"}), "application/json")
+            raw = self.read_body(MAX_PUSH)
+            if raw is None:
+                return self.send(413, json.dumps({"error": "push too large"}), "application/json")
+            try:
+                result = accept_push(v.db, student_id, json.loads(raw))
+            except (ValueError, ViewerError, AttributeError, TypeError) as e:
+                msg = str(e) if isinstance(e, ViewerError) else "push isn't valid JSON views"
+                return self.send(422, json.dumps({"error": msg}), "application/json")
+            return self.send(200, json.dumps({"ok": True, **result}), "application/json")
+        raw = self.read_body(4096)
+        form = urllib.parse.parse_qs((raw or b"").decode(errors="replace"))
+        if path == "/signin":
+            session = v.sign_in((form.get("t") or [""])[0])
+            if not session:
+                body = ("<h1>That link doesn't work</h1><p>It was already used or has expired. "
+                        "Ask the school office for a new one.</p>")
+                return self.send(400, page(v.cfg, "Sign in", body))
+            return self.redirect("/", [self.cookie(session, SESSION_TTL)])
+        if path == "/signout":
+            v.sign_out(self.headers.get("Cookie"))
+            return self.redirect("/", [self.cookie("", 0)])
+        return self.not_found()
+
+
+def make_server(data, host, port):
+    viewer = Viewer(data)
+    handler = type("BoundHandler", (Handler,), {"viewer": viewer})
+    server = http.server.ThreadingHTTPServer((host, port), handler)
+    server.daemon_threads = True
+    return server
+
+
+# ---------------------------------------------------------------- admin CLI
+
+def cmd_init(args):
+    data = data_dir(args.data)
+    data.mkdir(parents=True, exist_ok=True, mode=0o700)
+    cfg_path = data / "config.toml"
+    if cfg_path.exists():
+        print(f"already set up: {cfg_path}")
+    else:
+        if not args.base_url.startswith("https://") and args.env == "production":
+            raise ViewerError("production needs an https:// base URL")
+        cfg_path.write_text(f'env = "{args.env}"\nbase_url = "{args.base_url}"\n'
+                            f"secure_cookies = {'true' if args.base_url.startswith('https://') else 'false'}\n")
+        print(f"set up {args.env} viewer in {data}")
+    connect(data).close()
+    return 0
+
+
+_admin_dbs = []
+
+
+def open_admin(args):
+    data = data_dir(args.data)
+    cfg = load_config(data)
+    db = connect(data)
+    _admin_dbs.append(db)
+    return cfg, db
+
+
+def cmd_person(args):
+    cfg, db = open_admin(args)
+    email = check_email(cfg, args.email)
+    if args.grad_year and not args.student:
+        raise ViewerError("--grad-year is for students")
+    try:
+        cur = db.execute("INSERT INTO people (name, email, is_student, grad_year, is_admin) "
+                         "VALUES (?, ?, ?, ?, ?)",
+                         (args.name, email, int(args.student), args.grad_year, int(args.admin)))
+    except sqlite3.IntegrityError:
+        raise ViewerError(f"{email} is already here")
+    print(f"added {args.name} (id {cur.lastrowid})")
+    return 0
+
+
+def cmd_grant(args, revoke=False):
+    cfg, db = open_admin(args)
+    person, student = person_by_email(db, args.person), person_by_email(db, args.student)
+    if not student["is_student"]:
+        raise ViewerError(f"{args.student} isn't a student")
+    scope = (args.scope or "").strip()
+    if (args.audience in SCOPED) != bool(scope):
+        raise ViewerError(f"{args.audience} grants {'need' if args.audience in SCOPED else 'take no'} --scope")
+    if revoke:
+        n = db.execute("DELETE FROM grants WHERE person_id = ? AND student_id = ? AND audience = ? "
+                       "AND scope = ?", (person["id"], student["id"], args.audience, scope)).rowcount
+        print("revoked" if n else "nothing to revoke")
+        return 0
+    if args.primary_custody and args.audience != "parent":
+        raise ViewerError("--primary-custody is for parent grants")
+    if person["id"] == student["id"]:
+        raise ViewerError("a student has their own Locker; no grant needed")
+    db.execute("INSERT OR REPLACE INTO grants VALUES (?, ?, ?, ?, ?)",
+               (person["id"], student["id"], args.audience, scope, int(args.primary_custody)))
+    note = ""
+    if args.audience == "parent" and not args.primary_custody:
+        note = " (no primary custody: recorded, but this parent sees no view)"
+    print(f"granted {args.audience}{' ' + scope if scope else ''}{note}")
+    return 0
+
+
+def cmd_sign_in_link(args):
+    cfg, db = open_admin(args)
+    person = person_by_email(db, args.email)
+    token = secrets.token_urlsafe(32)
+    db.execute("INSERT INTO sign_in VALUES (?, ?, ?)",
+               (digest(token), person["id"], clock() + SIGN_IN_TTL))
+    print(f"{cfg['base_url']}/signin?t={token}")
+    return 0
+
+
+def cmd_push_token(args):
+    cfg, db = open_admin(args)
+    student = person_by_email(db, args.email)
+    if not student["is_student"]:
+        raise ViewerError(f"{args.email} isn't a student")
+    token = secrets.token_urlsafe(32)
+    db.execute("INSERT OR REPLACE INTO push_tokens VALUES (?, ?, ?)",
+               (digest(token), student["id"], clock()))
+    print(token)
+    print("Shown once. Put it in the student's device push key file "
+          "(docs/viewer.md); the old token stops working.", file=sys.stderr)
+    return 0
+
+
+def cmd_list(args):
+    cfg, db = open_admin(args)
+    print(f"{cfg['env']} viewer at {cfg['base_url']}")
+    for p in db.execute("SELECT * FROM people ORDER BY is_student DESC, name"):
+        kind = "student" if p["is_student"] else ("admin" if p["is_admin"] else "person")
+        print(f"  {p['id']:>4}  {kind:<8} {p['name']} <{p['email']}>")
+    for g in db.execute(
+            """SELECT p.email pe, s.email se, g.audience, g.scope, g.primary_custody FROM grants g
+               JOIN people p ON p.id = g.person_id JOIN people s ON s.id = g.student_id
+               ORDER BY se, g.audience, g.scope"""):
+        extra = " primary custody" if g["primary_custody"] else ""
+        scope = f" {g['scope']}" if g["scope"] else ""
+        print(f"  grant {g['audience']}{scope}: {g['pe']} -> {g['se']}{extra}")
+    return 0
+
+
+def cmd_serve(args):
+    data = data_dir(args.data)
+    server = make_server(data, args.host, args.port)
+    cfg = server.RequestHandlerClass.viewer.cfg
+    print(f"omalocker-viewer ({cfg['env']}) on http://{args.host}:{server.server_address[1]}",
+          file=sys.stderr)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="omalocker-viewer", description=__doc__.split("\n")[0])
+    parser.add_argument("--version", action="version", version=f"omalocker-viewer {VERSION}")
+    parser.add_argument("--data", help="data folder (default /var/lib/omalocker-viewer)")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("init", help="set up a viewer's data folder")
+    p.add_argument("--env", choices=["staging", "production"], required=True)
+    p.add_argument("--base-url", required=True, help="the address people open")
+    p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser("person", help="add a person")
+    psub = p.add_subparsers(dest="action", required=True)
+    pa = psub.add_parser("add")
+    pa.add_argument("--name", required=True)
+    pa.add_argument("--email", required=True)
+    pa.add_argument("--student", action="store_true")
+    pa.add_argument("--grad-year", type=int)
+    pa.add_argument("--admin", action="store_true")
+    pa.set_defaults(func=cmd_person)
+
+    for name, revoke in (("grant", False), ("revoke", True)):
+        p = sub.add_parser(name, help=f"{name} a person's view of a student")
+        p.add_argument("audience", choices=AUDIENCES)
+        p.add_argument("--person", required=True, help="their email")
+        p.add_argument("--student", required=True, help="the student's email")
+        p.add_argument("--scope", help="class (teacher) or activity name, as in the Locker")
+        if not revoke:
+            p.add_argument("--primary-custody", action="store_true")
+        p.set_defaults(func=lambda a, r=revoke: cmd_grant(a, revoke=r))
+
+    p = sub.add_parser("sign-in-link", help="print a one-time sign-in link")
+    p.add_argument("email")
+    p.set_defaults(func=cmd_sign_in_link)
+
+    p = sub.add_parser("push-token", help="make a student device's push token")
+    p.add_argument("email")
+    p.set_defaults(func=cmd_push_token)
+
+    p = sub.add_parser("list", help="people and grants")
+    p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("serve", help="run the viewer")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8380)
+    p.set_defaults(func=cmd_serve)
+
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except ViewerError as e:
+        print(f"omalocker-viewer: {e}", file=sys.stderr)
+        return 1
+    finally:
+        while _admin_dbs:
+            _admin_dbs.pop().close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -38,7 +38,10 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
 - 2026-11-10: `omalocker views` (student Lockers only): per-audience views in
   `~/.local/state/omalocker/views/` with `view.json` (`as_of`); rebuilt from scratch each run;
   doctor fails on a view holding a note its audience can't see. Not pushed anywhere yet.
+- 2026-11-10: viewer started: `viewer/omalocker-viewer` (stdlib, SQLite, staging takes test
+  emails only), `omalocker push`; docs in `docs/viewer.md`. Sign-in = one-time links printed
+  by admin; family/custody records by `grant`. Tests: `tests/test_viewer.py` + connections.
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
-  `docs/plan.md` (backup key per person?); confirm classmates are left out of parent views; viewer app
-  (receives the views) or pacos packaging.
+  `docs/plan.md` (backup key, where the viewer runs, parent sign-in, custody records);
+  viewer: emailed links, records import, graduation, audit log; then pacos packaging. Notes about classmates are in no view (seno, 2026-11-10).
