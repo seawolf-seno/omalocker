@@ -169,6 +169,9 @@ rights normally move to the student at 18).
 
 ## Decisions still open
 
+Asked Mr. Eno by email (2026-11-10): 3, 4 and 5 below, plus the FERPA check on parent access
+after 18. Waiting for his answer.
+
 1. **Obsidian for students under 18.** Checked 2026-11-10 (terms, license and privacy
    policy all last updated 2025 or earlier):
    - **Cost:** free for schools. The license lists "educational institutions" under free
