@@ -1,5 +1,5 @@
 [Unit]
-Description=Send this student's views to the OmaLocker viewer every hour
+Description=Sync with the OmaLocker viewer every hour
 
 [Timer]
 OnBootSec=10min

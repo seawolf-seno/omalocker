@@ -20,7 +20,7 @@ settings exist, so installing the package alone changes nothing for anyone.
 |---|---|---|
 | `omalocker-setup.service` | each login, only while `~/Locker` doesn't exist | `omalocker init`, with the role from `/etc/omalocker/omalocker.toml` |
 | `omalocker-backup.timer` | hourly | `omalocker backup --if-due`: an encrypted backup every 2 days (`docs/backup.md`) |
-| `omalocker-push.timer` | hourly | `omalocker push --if-set-up`: rebuilds and sends a student's views; does nothing on a teacher's laptop, without viewer settings, or after graduation |
+| `omalocker-push.timer` | hourly | sync with the viewer: `pull-levels` and `push` on a student's laptop, `send-levels` on a teacher's; each step does nothing where it doesn't apply, without viewer settings, or after graduation |
 
 ## What pacos has to put on each laptop
 
@@ -33,6 +33,7 @@ Nothing secret is in the package. pacos (or IT) writes these per laptop:
 | backup key file | backup | the restic key; readable by that person only |
 | `/etc/omalocker/viewer.toml` | push (students only) | `url = "https://omalocker-viewer.vercel.app"`, `token_file = "/etc/omalocker/viewer-key"` |
 | `/etc/omalocker/viewer-key` | push | the student's push token from `omalocker-viewer push-token <email>`; owned by the student, mode 600 |
+| `/etc/omalocker/viewer.toml` + key | send-levels (teachers) | same two files on a teacher's laptop, with the teacher's levels token (`push-token <teacher email>`) |
 
 ## Not in this package (pacos side)
 

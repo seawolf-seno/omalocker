@@ -68,7 +68,9 @@ CREATE TABLE IF NOT EXISTS people (
   email TEXT NOT NULL UNIQUE COLLATE NOCASE,
   is_student INTEGER NOT NULL DEFAULT 0,
   grad_year INTEGER,
-  is_admin INTEGER NOT NULL DEFAULT 0
+  is_admin INTEGER NOT NULL DEFAULT 0,
+  blackbaud_id TEXT,
+  canvas_id TEXT
 );
 CREATE TABLE IF NOT EXISTS grants (
   person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
@@ -115,6 +117,22 @@ CREATE TABLE IF NOT EXISTS notes (
 );
 -- Who opened what, and every change. No foreign keys: entries outlive the rows they
 -- mention, except at graduation (docs/viewer.md, "Access log").
+-- A teacher's laptop sends levels with one of these; a student's pulls them with its push token.
+CREATE TABLE IF NOT EXISTS level_tokens (
+  token_hash TEXT PRIMARY KEY,
+  person_id INTEGER NOT NULL UNIQUE,
+  created REAL NOT NULL
+);
+-- Each student's latest levels in one class, from that class's teacher (JSON: ideas, objectives).
+CREATE TABLE IF NOT EXISTS levels (
+  student_id INTEGER NOT NULL,
+  class TEXT NOT NULL,
+  teacher_id INTEGER NOT NULL,
+  as_of TEXT NOT NULL,
+  data TEXT NOT NULL,
+  received REAL NOT NULL,
+  PRIMARY KEY (student_id, class)
+);
 -- Pushes that come in parts wait here until commit (UPLOAD_TTL).
 CREATE TABLE IF NOT EXISTS push_uploads (
   upload TEXT PRIMARY KEY,
@@ -371,7 +389,20 @@ def connect(target, schema=None):
     db = LocalConnection(target / "viewer.db")
     if schema is not False:
         db.executescript(SCHEMA)
+        migrate(db)
     return db
+
+
+# Columns added after a table was first made: init adds them to older databases.
+ADDED_COLUMNS = {"people": [("blackbaud_id", "TEXT"), ("canvas_id", "TEXT")]}
+
+
+def migrate(db):
+    for table, cols in ADDED_COLUMNS.items():
+        have = {r[1] for r in db.execute(f"PRAGMA table_info({table})").fetchall()}
+        for name, kind in cols:
+            if name not in have:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
 
 
 def load_config(db):
@@ -636,6 +667,99 @@ def push_commit(db, student_id, payload):
         db.execute("DELETE FROM push_staging WHERE upload = ?", (upload,)),
         db.execute("DELETE FROM push_uploads WHERE upload = ?", (upload,))))
     return {"views": len(headers), "notes": sum(expected.values())}
+
+
+# ---------------------------------------------------------------- levels
+#
+# Teacher -> student mastery levels. A teacher's laptop sends each class's latest
+# levels keyed by school ids (Blackbaud or Canvas), never names. The viewer keeps
+# only students that teacher has a teacher grant for in that class. Each student's
+# laptop pulls its own (GET /api/levels) into Mastery/<class>.md.
+
+LEVEL_WORDS = ["Not yet", "Beginning", "Developing", "Proficient", "Extending"]
+
+
+def short_text(value, limit, what):
+    if value is None:
+        return None
+    if not isinstance(value, (str, int)) or len(str(value)) > limit:
+        raise ViewerError(f"bad {what}")
+    return str(value)
+
+
+def check_level_rows(rows, fields, what):
+    out = []
+    for r in rows or []:
+        if not isinstance(r, dict) or r.get("level") not in LEVEL_WORDS:
+            raise ViewerError(f"every {what} needs a level word")
+        out.append({k: short_text(r.get(k), 300, f"{what} {k}") for k in fields}
+                   | {"level": r["level"]})
+    if len(out) > 2000:
+        raise ViewerError(f"too many {what}s")
+    return out
+
+
+def accept_levels(db, teacher, payload):
+    classes = payload.get("classes") if isinstance(payload, dict) else None
+    if not isinstance(classes, list) or len(classes) > 100:
+        raise ViewerError("levels need a list of classes")
+    stored = unmatched = not_granted = 0
+    checked = []
+    for c in classes:
+        if not isinstance(c, dict):
+            raise ViewerError("a class must be an object")
+        name = short_text(c.get("class"), 200, "class name")
+        if not name or "/" in name or name.startswith("."):
+            raise ViewerError("bad class name")
+        as_of = short_text(c.get("as_of"), 40, "as_of") or ""
+        students = c.get("students")
+        if not isinstance(students, list) or len(students) > 500:
+            raise ViewerError("a class needs a list of students")
+        rows = []
+        for s in students:
+            if not isinstance(s, dict):
+                raise ViewerError("a student must be an object")
+            ids = {k: short_text(s.get(k), 64, k) for k in ("blackbaud_id", "canvas_id")}
+            data = {"ideas": check_level_rows(s.get("ideas"), ("name", "joint"), "core idea"),
+                    "objectives": check_level_rows(s.get("objectives"),
+                                                   ("id", "title", "idea", "week"), "objective")}
+            rows.append((ids, data))
+        checked.append((name, as_of, rows))
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        for name, as_of, rows in checked:
+            # Each send is the whole class: this teacher's earlier levels for it go.
+            db.execute("DELETE FROM levels WHERE teacher_id = ? AND class = ?", (teacher["id"], name))
+            for ids, data in rows:
+                student = None
+                for key in ("blackbaud_id", "canvas_id"):
+                    if ids[key] and not student:
+                        student = db.execute(
+                            f"SELECT id FROM people WHERE is_student = 1 AND {key} = ?",
+                            (ids[key],)).fetchone()
+                if not student:
+                    unmatched += 1
+                    continue
+                if not can_see(db, teacher, student["id"], "teacher", name):
+                    not_granted += 1
+                    continue
+                db.execute("INSERT OR REPLACE INTO levels VALUES (?, ?, ?, ?, ?, ?)",
+                           (student["id"], name, teacher["id"], as_of, json.dumps(data), clock()))
+                stored += 1
+        db.execute("COMMIT")
+    except BaseException:
+        db.execute("ROLLBACK")
+        raise
+    return {"classes": len(checked), "students": stored, "unmatched": unmatched,
+            "not_yours": not_granted}
+
+
+def levels_for(db, student_id):
+    rows = db.execute(
+        "SELECT l.*, p.name AS teacher FROM levels l LEFT JOIN people p ON p.id = l.teacher_id "
+        "WHERE l.student_id = ? ORDER BY l.class", (student_id,)).fetchall()
+    return {"classes": [{"class": r["class"], "teacher": r["teacher"] or "", "as_of": r["as_of"],
+                         **json.loads(r["data"])} for r in rows]}
 
 
 # ---------------------------------------------------------------- markdown
@@ -936,7 +1060,8 @@ def mastery_levels(text):
     rows = []
     for line in text.split("\n"):
         cells = [c.strip() for c in line.strip().strip("|").split("|")] if line.strip().startswith("|") else []
-        if len(cells) >= 2 and cells[-1] in ("Not yet", "Beginning", "Developing", "Proficient", "Extending"):
+        # Core-idea rows only (two columns); the objectives table has three.
+        if len(cells) == 2 and cells[-1] in LEVEL_WORDS:
             rows.append((link_name(cells[0]), cells[-1]))
     return rows
 
@@ -1091,6 +1216,14 @@ class Viewer:
             name, _, value = part.strip().partition("=")
             if name == COOKIE:
                 self.db.execute("DELETE FROM sessions WHERE token_hash = ?", (digest(value),))
+
+    def level_teacher(self, auth_header):
+        m = re.fullmatch(r"Bearer ([\w-]{20,200})", (auth_header or "").strip())
+        if not m:
+            return None
+        return self.db.execute(
+            "SELECT p.* FROM level_tokens t JOIN people p ON p.id = t.person_id "
+            "WHERE t.token_hash = ? AND p.is_student = 0", (digest(m.group(1)),)).fetchone()
 
     def push_student(self, auth_header):
         m = re.fullmatch(r"Bearer ([\w-]{20,200})", (auth_header or "").strip())
@@ -1278,6 +1411,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         v = self.viewer
         url = urllib.parse.urlsplit(self.path)
         query = urllib.parse.parse_qs(url.query)
+        if url.path == "/api/levels":
+            student_id = v.push_student(self.headers.get("Authorization"))
+            if student_id is None:
+                audit(v.db, "device", "levels-pull", result="denied", detail="bad push token")
+                return self.send(401, json.dumps({"error": "bad push token"}), "application/json")
+            result = levels_for(v.db, student_id)
+            audit(v.db, "device", "levels-pull", student_id,
+                  detail=f"{len(result['classes'])} classes")
+            return self.send(200, json.dumps(result), "application/json")
         if url.path == "/style.css":
             return self.send(200, STYLE, "text/css; charset=utf-8")
         if url.path == "/signin":
@@ -1332,6 +1474,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         v = self.viewer
         path = urllib.parse.urlsplit(self.path).path
+        if path == "/api/levels":
+            teacher = v.level_teacher(self.headers.get("Authorization"))
+            if teacher is None:
+                audit(v.db, "device", "levels", result="denied", detail="bad levels token")
+                return self.send(401, json.dumps({"error": "bad levels token"}), "application/json")
+            raw = self.read_body(MAX_PART)
+            if raw is None:
+                return self.send(413, json.dumps({"error": "too large"}), "application/json")
+            try:
+                result = accept_levels(v.db, teacher, json.loads(raw))
+            except (ValueError, ViewerError, AttributeError, TypeError) as e:
+                msg = str(e) if isinstance(e, ViewerError) else "levels aren't valid JSON"
+                audit(v.db, teacher, "levels", result="refused", detail=msg)
+                return self.send(422, json.dumps({"error": msg}), "application/json")
+            audit(v.db, teacher, "levels", detail=(
+                f"{result['classes']} classes, {result['students']} students"
+                f", {result['unmatched']} unmatched, {result['not_yours']} not theirs"))
+            return self.send(200, json.dumps({"ok": True, **result}), "application/json")
         if path in PUSH_ROUTES:
             student_id = v.push_student(self.headers.get("Authorization"))
             if student_id is None:
@@ -1423,6 +1583,7 @@ def cmd_init(args):
     target = db_target(args.data, args.db)
     db = connect(target, schema=True)
     _admin_dbs.append(db)
+    migrate(db)
     where = target if isinstance(target, str) else target / "viewer.db"
     existing = {r["key"]: r["value"] for r in db.execute("SELECT key, value FROM settings")}
     if existing.get("env"):
@@ -1454,15 +1615,32 @@ def cmd_person(args):
     email = check_email(cfg, args.email)
     if args.grad_year and not args.student:
         raise ViewerError("--grad-year is for students")
+    if (args.blackbaud_id or args.canvas_id) and not args.student:
+        raise ViewerError("--blackbaud-id and --canvas-id are for students")
     try:
-        cur = db.execute("INSERT INTO people (name, email, is_student, grad_year, is_admin) "
-                         "VALUES (?, ?, ?, ?, ?)",
-                         (args.name, email, int(args.student), args.grad_year, int(args.admin)))
+        cur = db.execute("INSERT INTO people (name, email, is_student, grad_year, is_admin, "
+                         "blackbaud_id, canvas_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                         (args.name, email, int(args.student), args.grad_year, int(args.admin),
+                          args.blackbaud_id, args.canvas_id))
     except sqlite3.IntegrityError:
         raise ViewerError(f"{email} is already here")
     audit(db, cli_actor(), "person-add", cur.lastrowid if args.student else None,
           detail=f"{email}{' student' if args.student else ''}{' admin' if args.admin else ''}")
     print(f"added {args.name} (id {cur.lastrowid})")
+    return 0
+
+
+def cmd_person_ids(args):
+    cfg, db = open_admin(args)
+    student = person_by_email(db, args.email)
+    if not student["is_student"]:
+        raise ViewerError(f"{args.email} isn't a student")
+    for key in ("blackbaud_id", "canvas_id"):
+        value = getattr(args, key)
+        if value is not None:
+            db.execute(f"UPDATE people SET {key} = ? WHERE id = ?", (value or None, student["id"]))
+    audit(db, cli_actor(), "person-ids", student["id"])
+    print(f"school ids set for {student['email']}")
     return 0
 
 
@@ -1529,16 +1707,25 @@ def cmd_sign_in_link(args):
 
 def cmd_push_token(args):
     cfg, db = open_admin(args)
-    student = person_by_email(db, args.email)
-    if not student["is_student"]:
-        raise ViewerError(f"{args.email} isn't a student")
+    person = person_by_email(db, args.email)
     token = secrets.token_urlsafe(32)
-    db.execute("INSERT OR REPLACE INTO push_tokens VALUES (?, ?, ?)",
-               (digest(token), student["id"], clock()))
-    audit(db, cli_actor(), "push-token", student["id"])
+    if person["is_student"]:
+        db.execute("INSERT OR REPLACE INTO push_tokens VALUES (?, ?, ?)",
+                   (digest(token), person["id"], clock()))
+        audit(db, cli_actor(), "push-token", person["id"])
+        what = "the student's laptop: it pushes views and pulls levels"
+    else:
+        teaches = db.execute("SELECT COUNT(*) FROM grants WHERE person_id = ? AND audience = "
+                             "'teacher'", (person["id"],)).fetchone()[0]
+        if not teaches:
+            raise ViewerError(f"{args.email} has no teacher grants; a token is for a teacher's laptop")
+        db.execute("INSERT OR REPLACE INTO level_tokens VALUES (?, ?, ?)",
+                   (digest(token), person["id"], clock()))
+        audit(db, cli_actor(), "levels-token", detail=person["email"])
+        what = "the teacher's laptop: it sends class levels"
     print(token)
-    print("Shown once. Put it in the student's device push key file "
-          "(docs/viewer.md); the old token stops working.", file=sys.stderr)
+    print(f"Shown once. For {what} (token_file in /etc/omalocker/viewer.toml); "
+          "the old token stops working.", file=sys.stderr)
     return 0
 
 
@@ -1593,11 +1780,11 @@ def cmd_graduate(args):
         audit(db, cli_actor(), "graduate", detail=f"student #{student['id']}: views, logins, "
               f"records and {logged} access-log entries deleted")
         sid = student["id"]
-        for table in ("notes", "views", "push_tokens", "push_staging", "push_uploads"):
+        for table in ("notes", "views", "push_tokens", "push_staging", "push_uploads", "levels"):
             db.execute(f"DELETE FROM {table} WHERE student_id = ?", (sid,))
         db.execute(f"DELETE FROM grants WHERE student_id = ? OR person_id IN ({marks})",
                    (sid, *gone))
-        for table in ("sign_in", "sessions"):
+        for table in ("sign_in", "sessions", "level_tokens"):
             db.execute(f"DELETE FROM {table} WHERE person_id IN ({marks})", gone)
         db.execute(f"DELETE FROM people WHERE id IN ({marks})", gone)
         db.execute("COMMIT")
@@ -1722,7 +1909,14 @@ def main(argv=None):
     pa.add_argument("--student", action="store_true")
     pa.add_argument("--grad-year", type=int)
     pa.add_argument("--admin", action="store_true")
+    pa.add_argument("--blackbaud-id", help="student's Blackbaud id (matches teachers' rosters)")
+    pa.add_argument("--canvas-id", help="student's Canvas id (matches teachers' rosters)")
     pa.set_defaults(func=cmd_person)
+    pi = psub.add_parser("ids", help="set a student's school ids (empty value clears one)")
+    pi.add_argument("email")
+    pi.add_argument("--blackbaud-id")
+    pi.add_argument("--canvas-id")
+    pi.set_defaults(func=cmd_person_ids)
 
     for name, revoke in (("grant", False), ("revoke", True)):
         p = sub.add_parser(name, help=f"{name} a person's view of a student")

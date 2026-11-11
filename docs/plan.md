@@ -116,7 +116,7 @@ mastery levels), with no AI, so it shows the teacher's judgment and nothing gues
 | Project | Flow | Contract | Test |
 |---|---|---|---|
 | **OmaMastery** (`~/Classes`) | Teacher device | Class folders live in the teacher's Locker; `ideas.toml`/`plan.toml` → `Classes/`, `Ideas/` notes; levels → mastery graph | Sample classes import; graph renders; `roster.toml`/`mastery.csv` never read by agents |
-| **Teacher → student levels** | via the viewer | Teacher pushes a class's levels; the student's Locker pulls its own into `Mastery/<class>.md` | Fictional class: a level change reaches the student and the parent view |
+| **Teacher → student levels** | via the viewer | `omalocker send-levels` sends a class's levels by school id (no names); the student's Locker pulls its own into `Mastery/<class>.md` (`omalocker pull-levels`) | Built 2026-11-10: a fictional class's levels reach the student's note and the parent view; names never leave the teacher's laptop |
 | **OmaLocker viewer** | Device → viewer (views only) | `omalocker push` sends the views; the viewer checks each person's role and, for parents, primary custody (`docs/viewer.md`) | Built and tested on a local staging viewer: fictional custodial and non-custodial parent, teacher, advisor, activity leader and admin each see the right view, or none. Still to do: a real staging host |
 | **Formation Pathways** | none | No connection, either way | Confirm OmaLocker sends nothing to FP and reads nothing from it |
 | **Grades → system of record** | unchanged | Existing path, not touched | Confirm OmaLocker sends no grades anywhere new |

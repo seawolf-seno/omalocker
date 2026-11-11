@@ -84,6 +84,30 @@ vercel deploy
 # 3. Fictional people, grants and a push token, as below, with --db instead of --data
 ```
 
+## Levels from teachers
+
+A teacher's levels reach each student's Locker through the viewer:
+
+1. **Teacher's laptop:** `omalocker send-levels` reads each class's `class/ideas/plan.toml`,
+   `mastery.csv` and the school ids in `roster.toml` (code only; agents still never open those
+   files). For every student it sends their latest level on each objective, and on each core
+   idea (their lowest on its objectives, as in `omalocker mastery`), keyed by **Blackbaud or
+   Canvas id. Names never leave the laptop.** Sample classes are skipped.
+2. **Viewer:** keeps only students it can match by id **and** that teacher has a teacher grant
+   for in that class (the class's note name, like `Biology`). Each send replaces that
+   teacher's levels for the class. The reply and the access log give counts only.
+3. **Student's laptop:** `omalocker pull-levels` writes `Mastery/<class>.md` (type `mastery`):
+   a core-idea table and a learning-target table inside its own `omalocker:omamastery` block;
+   the student's text around it stays. Idea names link only to notes the Locker has.
+4. The next push carries them into the views: the parent overview shows core-idea levels,
+   the class's teacher view the whole note.
+
+Setup: `omalocker-viewer person add ... --student --blackbaud-id <id>` (or
+`person ids <email> --blackbaud-id <id>` later), and `omalocker-viewer push-token <teacher
+email>` for the teacher's laptop (only someone with a teacher grant gets one). The hourly
+sync service runs `pull-levels`, `push` and `send-levels`; each does nothing where it doesn't
+apply.
+
 ## Signing in by email
 
 The sign-in page asks for an email address and mails a one-time link (15 minutes). The page

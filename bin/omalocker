@@ -10,11 +10,14 @@ Python stdlib only. See docs/format.md for the note format.
   omalocker restore [--to DIR] [--snapshot ID]
   omalocker views [--out DIR]
   omalocker push [--if-set-up]
+  omalocker send-levels [--if-set-up]      (teacher)
+  omalocker pull-levels [--if-set-up]      (student)
   omalocker graduate --to DIR
   omalocker doctor [--show-names] [--json]
 
-Never opens roster.toml or notes.md in a class folder. Only `mastery` reads
-mastery.csv, to count levels; names stay in memory and never reach a note.
+Never opens notes.md in a class folder. `mastery` and `send-levels` read
+mastery.csv, and `send-levels` reads the school ids in roster.toml; names stay in
+memory and never reach a note or leave the laptop.
 """
 
 import argparse
@@ -1440,7 +1443,8 @@ def viewer_config():
 PUSH_PART_BYTES = 3 * 1024 * 1024
 
 
-def push_views(cfg, out):
+def viewer_call(cfg, path, payload=None):
+    """POST payload (or GET when None) to the viewer with this laptop's token."""
     import urllib.error
     import urllib.request
     base = str(cfg["url"]).rstrip("/")
@@ -1448,23 +1452,29 @@ def push_views(cfg, out):
     if parts.scheme != "https" and parts.hostname not in ("localhost", "127.0.0.1", "::1"):
         raise ViewError("the viewer url must be https:// (student data never goes out unencrypted)")
     token = Path(str(cfg["token_file"])).expanduser().read_text().strip()
+    body = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(base + path, data=body,
+                                 method="POST" if body is not None else "GET",
+                                 headers={"Authorization": f"Bearer {token}",
+                                          "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read()).get("error")
+        except ValueError:
+            msg = None
+        raise ViewError(f"the viewer said {e.code}: {msg or e.reason}")
+    except urllib.error.URLError as e:
+        raise ViewError(f"can't reach the viewer: {e.reason}")
+
+
+def push_views(cfg, out):
     limit = int(os.environ.get("OMALOCKER_PUSH_PART_BYTES") or PUSH_PART_BYTES)
 
     def post(path, payload):
-        body = json.dumps(payload).encode()
-        req = urllib.request.Request(base + path, data=body, method="POST", headers={
-            "Authorization": f"Bearer {token}", "Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                return json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            try:
-                msg = json.loads(e.read()).get("error")
-            except ValueError:
-                msg = None
-            raise ViewError(f"the viewer said {e.code}: {msg or e.reason}")
-        except urllib.error.URLError as e:
-            raise ViewError(f"can't reach the viewer: {e.reason}")
+        return viewer_call(cfg, path, payload)
 
     views = []
     for manifest_path in sorted(out.rglob("view.json")):
@@ -1541,6 +1551,180 @@ def cmd_push(args):
     if skipped:
         print(f"  {skipped} note{'s' if skipped > 1 else ''} left out: frontmatter can't be read "
               "(run `omalocker doctor`)")
+    return 0
+
+
+# ---------------------------------------------------------------- levels
+#
+# Teacher -> student. `send-levels` (teacher's laptop) reads each class's plan files,
+# mastery.csv and the ids in roster.toml, and sends every student's latest levels
+# keyed by school id: names stay in memory and never leave the laptop. The viewer
+# keeps only students the teacher has a grant for in that class. `pull-levels`
+# (student's laptop) writes the student's own levels into Mastery/<class>.md.
+
+def read_roster_ids(folder):
+    """{student name: {"blackbaud_id", "canvas_id"}} from roster.toml. Names are only keys."""
+    path = folder / "roster.toml"
+    if not path.exists():
+        return {}
+    ids = {}
+    for s in load_toml(path).get("student", []):
+        name = str(s.get("name") or "").strip()
+        if name:
+            ids[name] = {k: (str(s[k]) if s.get(k) not in (None, "") else None)
+                         for k in ("blackbaud_id", "canvas_id")}
+    return ids
+
+
+def student_levels(c, levels):
+    """{student: {"ideas": [...], "objectives": [...]}} from a class and its latest levels.
+    A core idea's level is the student's lowest on its objectives (as in `mastery`)."""
+    ideas = {note_name(i["name"]): i for i in c["ideas"]}
+    objectives = [o for o in c["objectives"] if o.get("id")]
+    for o in objectives:
+        if o.get("idea") and note_name(o["idea"]) not in ideas:
+            ideas[note_name(o["idea"])] = {"name": o["idea"]}
+    students = {s for per in levels.values() for s in per}
+    out = {}
+    for s in students:
+        objs, by_idea = [], {}
+        for o in sorted(objectives, key=lambda o: str(o.get("week", ""))):
+            level = levels.get(o["id"], {}).get(s)
+            if level is None:
+                continue
+            idea = note_name(o["idea"]) if o.get("idea") else None
+            objs.append({"id": str(o["id"]), "title": str(o.get("title") or o["id"]),
+                         "idea": idea, "week": str(o.get("week") or ""), "level": LEVELS[level]})
+            if idea:
+                by_idea[idea] = min(level, by_idea.get(idea, level))
+        out[s] = {"ideas": [{"name": n, "joint": note_name(ideas[n]["joint"]) if ideas[n].get("joint") else None,
+                             "level": LEVELS[lv]} for n, lv in by_idea.items()],
+                  "objectives": objs}
+    return out
+
+
+def locker_role(locker):
+    try:
+        me, _ = read_note(locker / "Me.md")
+    except (OSError, FormatError, UnicodeDecodeError):
+        return None
+    return (me or {}).get("role")
+
+
+def cmd_send_levels(args):
+    quiet = 0 if args.if_set_up else 1
+    locker = Path(args.locker or default_locker()).expanduser()
+    classes_dir = Path(args.classes or home() / "Classes").expanduser()
+    try:
+        cfg = viewer_config()
+    except ViewError as e:
+        print(f"omalocker: {e}", file=sys.stderr)
+        return 1
+    if args.if_set_up and locker_role(locker) != "teacher":
+        print("omalocker: not a teacher's Locker; no levels to send")
+        return 0
+    if cfg is None:
+        print("omalocker: the viewer isn't set up on this device "
+              "(/etc/omalocker/viewer.toml; see docs/viewer.md)", file=sys.stderr)
+        return quiet
+    if not classes_dir.is_dir():
+        print(f"omalocker: no classes folder at {classes_dir}", file=sys.stderr)
+        return quiet
+    by_id = class_notes_by_id(locker / "Classes") if (locker / "Classes").is_dir() else {}
+    classes, no_id = [], 0
+    for c in read_classes(classes_dir):
+        if c["sample"]:
+            continue  # OmaMastery's sample classes have made-up students
+        try:
+            levels, as_of = read_levels(c["path"])
+            ids = read_roster_ids(c["path"])
+        except (OSError, UnicodeDecodeError, csv.Error, tomllib.TOMLDecodeError) as e:
+            print(f"  skipped {c['id']}: can't read it ({e.__class__.__name__})", file=sys.stderr)
+            continue
+        students = []
+        for name, data in student_levels(c, levels).items():
+            sid = ids.get(name) or {}
+            if not (sid.get("blackbaud_id") or sid.get("canvas_id")):
+                no_id += 1
+                continue
+            students.append({**sid, **data})
+        classes.append({"class": by_id.get(c["id"]) or note_name(c["name"]),
+                        "as_of": as_of or "", "students": students})
+    if not classes:
+        print("omalocker: no classes with levels to send")
+        return 0
+    try:
+        r = viewer_call(cfg, "/api/levels", {"classes": classes})
+    except (ViewError, OSError) as e:
+        print(f"omalocker: {e}", file=sys.stderr)
+        return 1
+    print(f"Sent levels for {r['classes']} classes: {r['students']} students stored")
+    if r["unmatched"]:
+        print(f"  {r['unmatched']} not matched to a student in the viewer (no Blackbaud or "
+              "Canvas id on file there)")
+    if r["not_yours"]:
+        print(f"  {r['not_yours']} matched a student you have no teacher grant for in that class")
+    if no_id:
+        print(f"  {no_id} students have no Blackbaud or Canvas id in the roster; run "
+              "OmaMastery setup to refresh it")
+    return 0
+
+
+def mastery_block(c, locker):
+    def idea_cell(name):
+        if name and (locker / "Ideas" / f"{note_name(name)}.md").exists():
+            return link(note_name(name))
+        return name or ""
+    lines = ["| Core idea | Latest level |", "|---|---|"]
+    lines += [f"| {idea_cell(i['name'])} | {i['level']} |" for i in c.get("ideas", [])]
+    if c.get("objectives"):
+        lines += ["", "| Learning target | Core idea | Level |", "|---|---|---|"]
+        lines += [f"| {o['title'].replace('|', '/')} | {idea_cell(o.get('idea'))} | {o['level']} |"
+                  for o in c["objectives"]]
+    return "\n".join(lines)
+
+
+def cmd_pull_levels(args):
+    quiet = 0 if args.if_set_up else 1
+    locker = Path(args.locker or default_locker()).expanduser()
+    if graduated():
+        print("omalocker: this Locker graduated; levels aren't pulled any more", file=sys.stderr)
+        return quiet
+    if locker_role(locker) != "student":
+        print("omalocker: not a student's Locker; no levels to pull")
+        return quiet
+    try:
+        cfg = viewer_config()
+        if cfg is None:
+            print("omalocker: the viewer isn't set up on this device "
+                  "(/etc/omalocker/viewer.toml; see docs/viewer.md)", file=sys.stderr)
+            return quiet
+        got = viewer_call(cfg, "/api/levels")
+    except (ViewError, OSError) as e:
+        print(f"omalocker: {e}", file=sys.stderr)
+        return 1
+    changed = 0
+    for c in got.get("classes", []):
+        cls = note_name(str(c.get("class") or ""))
+        path = locker / "Mastery" / f"{cls}.md"
+        owned = {"type": "mastery", "class": link(cls), "source": SOURCE,
+                 "as_of": c.get("as_of") or None}
+        if path.exists():
+            try:
+                props, body = read_note(path)
+            except (FormatError, UnicodeDecodeError):
+                print(f"  skipped Mastery/{cls}.md: frontmatter can't be read", file=sys.stderr)
+                continue
+            props = props or {}
+        else:
+            teacher = c.get("teacher") or "your teacher"
+            props, body = {}, (f"# {cls}: mastery\n\nFrom {teacher}. Read-only: changes come "
+                               "from the teacher.\n")
+        props.update(owned)
+        body = set_block(body, SOURCE, mastery_block(c, locker))
+        if write_if_changed(path, dump_props(props) + body):
+            changed += 1
+    print(f"Levels for {len(got.get('classes', []))} classes; {changed} notes changed")
     return 0
 
 
@@ -1879,6 +2063,20 @@ def main(argv=None):
                    help="for the timer: do nothing (and don't fail) on a laptop that has "
                         "no viewer settings, isn't a student's, or has graduated")
     p.set_defaults(func=cmd_push)
+
+    p = sub.add_parser("send-levels", help="teacher: send each class's levels to the viewer "
+                                          "(by school id; names stay here)")
+    p.add_argument("--classes", help="OmaMastery folder (default ~/Classes)")
+    p.add_argument("--if-set-up", action="store_true",
+                   help="for the timer: do nothing on a laptop that isn't a teacher's or has "
+                        "no viewer settings")
+    p.set_defaults(func=cmd_send_levels)
+
+    p = sub.add_parser("pull-levels", help="student: get your levels into Mastery/<class>.md")
+    p.add_argument("--if-set-up", action="store_true",
+                   help="for the timer: do nothing on a laptop that isn't a student's, has no "
+                        "viewer settings, or has graduated")
+    p.set_defaults(func=cmd_pull_levels)
 
     p = sub.add_parser("graduate", help="hand the student their Locker; stop pushing and backups")
     p.add_argument("--to", required=True, help="folder for the Locker zip (e.g. a USB drive)")

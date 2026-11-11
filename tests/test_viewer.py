@@ -75,7 +75,7 @@ class Viewer(unittest.TestCase):
         threading.Thread(target=self.server.serve_forever, args=(0.05,), daemon=True).start()
 
         self.admin("person", "add", "--name", "Rowan Teague", "--email", STUDENT,
-                   "--student", "--grad-year", "2029")
+                   "--student", "--grad-year", "2029", "--blackbaud-id", "BB-ROWAN")
         for key, email in PEOPLE.items():
             extra = ["--admin"] if key == "admin" else []
             self.admin("person", "add", "--name", key.replace("_", " ").title(),
@@ -434,6 +434,106 @@ class Viewer(unittest.TestCase):
         try:
             for table in ("push_staging", "push_uploads"):
                 self.assertEqual(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
+        finally:
+            db.close()
+
+    def teacher_classes(self):
+        """A fictional teacher's OmaMastery folder: one Biology class, three students."""
+        bio = self.tmp / "teacher" / "Classes" / "bio"
+        bio.mkdir(parents=True)
+        (bio / "class.toml").write_text('name = "Biology"\n')
+        (bio / "ideas.toml").write_text(
+            '[[idea]]\nname = "Feedback loops in ecosystems"\njoint = "Systems and feedback"\n'
+            '[[idea]]\nname = "Cellular respiration"\n')
+        (bio / "plan.toml").write_text(
+            '[[objective]]\nid = "o1"\ntitle = "Trace energy in a food web"\n'
+            'idea = "Feedback loops in ecosystems"\nweek = "1"\n'
+            '[[objective]]\nid = "o2"\ntitle = "Model a predator-prey loop"\n'
+            'idea = "Feedback loops in ecosystems"\nweek = "2"\n'
+            '[[objective]]\nid = "o3"\ntitle = "Measure yeast respiration"\n'
+            'idea = "Cellular respiration"\nweek = "3"\n')
+        (bio / "roster.toml").write_text(
+            '[[student]]\nname = "Zz Fictional Rowan"\nblackbaud_id = "BB-ROWAN"\n'
+            '[[student]]\nname = "Zz Fictional Other"\nblackbaud_id = "BB-OTHER"\n'
+            '[[student]]\nname = "Zz Fictional Noid"\n')
+        (bio / "mastery.csv").write_text(
+            "date,student,objective,level,evidence\n"
+            "2026-11-01,Zz Fictional Rowan,o1,Proficient,\n"
+            "2026-11-03,Zz Fictional Rowan,o2,Beginning,\n"
+            "2026-11-05,Zz Fictional Rowan,o2,Developing,\n"   # latest wins
+            "2026-11-06,Zz Fictional Rowan,o3,Extending,\n"
+            "2026-11-06,Zz Fictional Other,o1,Not yet,\n"
+            "2026-11-06,Zz Fictional Noid,o1,Beginning,\n")
+        return bio.parent
+
+    def as_device(self, token, *argv):
+        cfg = self.tmp / f"device-{abs(hash(token))}.toml"
+        key = cfg.with_suffix(".key")
+        key.write_text(token + "\n")
+        cfg.write_text(f'url = "{self.base}"\ntoken_file = "{key}"\n')
+        saved = os.environ["OMALOCKER_VIEWER_CONFIG"]
+        os.environ["OMALOCKER_VIEWER_CONFIG"] = str(cfg)
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = om.main(list(argv))
+        finally:
+            os.environ["OMALOCKER_VIEWER_CONFIG"] = saved
+        return code, out.getvalue(), err.getvalue()
+
+    def test_teacher_levels_reach_the_student_and_the_parent(self):
+        classes = self.teacher_classes()
+        self.admin("person", "add", "--name", "Other", "--email", "other@student.example.org",
+                   "--student", "--blackbaud-id", "BB-OTHER")
+        code, err = self.admin("push-token", PEOPLE["advisor"], ok=False)
+        self.assertEqual(code, 1)                       # no teacher grants: no token
+        self.assertIn("no teacher grants", err)
+        teacher_token = self.admin("push-token", PEOPLE["biology"]).strip()
+        teacher_locker = self.tmp / "teacher" / "Locker"
+        code, out, err = self.as_device(teacher_token, "--locker", str(teacher_locker),
+                                        "send-levels", "--classes", str(classes))
+        self.assertEqual(code, 0, err)
+        self.assertIn("1 classes: 1 students stored", out)
+        self.assertIn("1 matched a student you have no teacher grant for", out)
+        self.assertIn("1 students have no Blackbaud or Canvas id", out)
+        db = vw.connect(self.target)
+        try:
+            stored = [dict(class_=r["class"], data=json.loads(r["data"]))
+                      for r in db.execute("SELECT * FROM levels")]
+            dump = json.dumps([list(r) for r in db.execute("SELECT * FROM levels")])
+        finally:
+            db.close()
+        self.assertNotIn("Zz", dump)                     # names never left the laptop
+        [row] = stored
+        ideas = {i["name"]: i["level"] for i in row["data"]["ideas"]}
+        self.assertEqual(ideas, {"Feedback loops in ecosystems": "Developing",   # lowest of o1,o2
+                                 "Cellular respiration": "Extending"})
+
+        # The student's laptop pulls its own levels, then pushes; the parent sees them.
+        student_token = (self.tmp / "push-key").read_text().strip()
+        code, out, err = self.as_device(student_token, "--locker", str(self.locker), "pull-levels")
+        self.assertEqual(code, 0, err)
+        note = (self.locker / "Mastery" / "Biology.md").read_text()
+        self.assertIn("| [[Cellular respiration]] | Extending |", note)
+        self.assertIn("| Model a predator-prey loop | [[Feedback loops in ecosystems]] | Developing |", note)
+        self.assertIn("Copied from [[Mr. Okafor]]", note)   # the student's own text stays
+        self.assertEqual(self.as_device(student_token, "--locker", str(self.locker),
+                                        "pull-levels")[1].split("; ")[1].strip(), "0 notes changed")
+        self.push()
+        parent = self.browser("parent")
+        status, body = self.get(parent, self.url("parent"))
+        self.assertIn("Extending", body)
+        self.assertNotIn("Model a predator-prey loop", body)   # objectives only inside the note
+        log = json.dumps(self.audit_log())
+        self.assertIn("1 students, 0 unmatched, 1 not theirs", log)
+        self.assertIn("levels-pull", log)
+
+        # A teacher can't pull, a student can't send, and graduation clears levels.
+        self.assertEqual(self.raw_push({"classes": []}, token=student_token, path="/api/levels")[0], 401)
+        self.admin("graduate", STUDENT, "--yes")
+        db = vw.connect(self.target)
+        try:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM levels WHERE student_id = 1").fetchone()[0], 0)
         finally:
             db.close()
 

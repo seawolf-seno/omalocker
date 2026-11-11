@@ -11,7 +11,8 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
   they own (`docs/format.md`).
 - Fictional data only in this repo, fixtures and tests. Real lockers stay on their machine.
 - Same agent rules as `~/Classes/AGENTS.md`: never open `roster.toml`, `mastery.csv`, or
-  notes about real students.
+  notes about real students. (Code may: `mastery` and `send-levels` read them; names stay in
+  memory.)
 
 - **Each person's device is the source of truth** (seno, 2026-11-10). Only views (filtered on
   the device, per audience) and the existing grades pipe leave it. See `docs/plan.md`.
@@ -66,6 +67,10 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
   omamastery). User units on for everyone via preset: setup (init with role from
   /etc/omalocker/omalocker.toml), backup timer, hourly push timer (`push --if-set-up`).
   pacos side (package list, /etc files, locking .obsidian) is in docs/packaging.md, not done here.
+- 2026-11-10: teacher -> student levels: `send-levels` (teacher; reads mastery.csv + roster
+  ids in code, sends by Blackbaud/Canvas id, never names) -> viewer (`levels` table, only
+  granted students) -> `pull-levels` (student; Mastery/<class>.md block). Hourly sync service
+  runs pull-levels, push, send-levels. Agents still never open roster.toml/mastery.csv.
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
   `docs/plan.md` (backup key, where the viewer runs, parent sign-in, custody records);
