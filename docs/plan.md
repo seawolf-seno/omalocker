@@ -195,8 +195,9 @@ emails, who signs data agreements (Resend, Vercel, Turso), backup storage, and d
    - **Privacy:** notes are "never sent to our servers"; no personal data or telemetry.
      The app only goes online for update checks, plugin and theme browsing, and embedded
      web pages; pacos turns these off for students.
-   - **Next:** email Obsidian for written permission for students under 18 using the
-     desktop app with no account, installed by the school. Keep the reply on file.
+   - **Asked (seno, 2026-11-10):** emailed Obsidian for written permission for students
+     under 18 using the desktop app with no account, installed by the school. Waiting for
+     the reply; keep it on file.
      Teachers and staff can use it now. If Obsidian says no, students get an open-source
      editor (SilverBullet or Logseq) instead; the Locker files don't change.
 2. **Backup key: one per person or one for the school** (`docs/backup.md`). Recommended:
