@@ -32,6 +32,9 @@ they're allowed to see. One stdlib Python file (SQLite, behind a TLS proxy): one
 sign-in links, family records with primary custody, grants, a role check on every page, and an access log (`omalocker-viewer audit`).
 Staging only for now. See `docs/viewer.md`.
 
+`make package` builds the Arch packages `omalocker` and `omalocker-viewer` into `build/` (see
+`docs/packaging.md`).
+
 `make test` runs the unit tests (backup tests need `restic`, or `OMALOCKER_RESTIC=/path/to/restic`); `make test-connections` builds a fictional school in a temp
 `HOME` and runs every connection built so far.
 

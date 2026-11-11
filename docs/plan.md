@@ -140,8 +140,9 @@ Obsidian.
 with a symlink.
 **2. Viewer app on staging.** Build the viewer (logins, family records, role checks), build
 views on the device, push to staging, fictional parent, teacher and advisor logins.
-**3. Student Locker in the pacos VM.** Package, managed Obsidian, Terminus milestone,
-Omawrite, encrypted backup and restore.
+**3. Student Locker in the pacos VM.** Package (built 2026-11-10: `make package`,
+`docs/packaging.md`), managed Obsidian, Terminus milestone, Omawrite, encrypted backup and
+restore.
 **4. Pilot.** One class, after leadership signs off on the decisions below.
 **At graduation.** Built 2026-11-10 (`docs/graduation.md`): `omalocker graduate` zips the
 Locker for the student and stops the device pushing and backing up; `omalocker-viewer

@@ -30,6 +30,8 @@ class Env(unittest.TestCase):
                           if k.startswith("XDG_") or k.startswith("OMALOCKER_")}
         # Never the real /etc or ~/.config backup settings.
         os.environ["OMALOCKER_BACKUP_CONFIG"] = str(self.tmp / "backup.toml")
+        os.environ["OMALOCKER_DEVICE_CONFIG"] = str(self.tmp / "omalocker.toml")
+        os.environ["OMALOCKER_VIEWER_CONFIG"] = str(self.tmp / "viewer.toml")
         self.locker = self.tmp / "Locker"
         self.classes = self.tmp / "Classes"
         shutil.copytree(REPO / "fixtures" / "classes", self.classes)
@@ -54,6 +56,24 @@ class Env(unittest.TestCase):
 
     def note(self, rel):
         return (self.locker / rel).read_text()
+
+
+class Packaging(unittest.TestCase):
+    def test_versions_match(self):
+        import re as _re
+        pkgver = _re.search(r"^pkgver=(\S+)$", (REPO / "pkgbuild" / "PKGBUILD").read_text(), _re.M)
+        viewer = _re.search(r'^VERSION = "([^"]+)"', (REPO / "viewer" / "omalocker-viewer").read_text(), _re.M)
+        self.assertEqual(pkgver.group(1), om.VERSION)
+        self.assertEqual(viewer.group(1), om.VERSION)
+
+    def test_units_the_package_installs_exist(self):
+        build = (REPO / "pkgbuild" / "PKGBUILD").read_text()
+        preset = (REPO / "systemd" / "80-omalocker.preset").read_text()
+        for unit in ("omalocker-setup.service", "omalocker-backup.timer", "omalocker-push.timer"):
+            self.assertTrue((REPO / "systemd" / unit).exists(), unit)
+            self.assertIn(f"enable {unit}", preset)
+        for unit in ("omalocker-backup.service", "omalocker-push.service"):
+            self.assertIn(unit, build)
 
 
 class Frontmatter(unittest.TestCase):
@@ -89,6 +109,18 @@ class Init(Env):
         (self.locker / "Me.md").write_text("mine")
         self.run_cli("init", "--role", "student")
         self.assertEqual(self.note("Me.md"), "mine")
+
+    def test_role_comes_from_the_device_settings(self):
+        Path(os.environ["OMALOCKER_DEVICE_CONFIG"]).write_text('role = "student"\n')
+        self.assertEqual(self.run_cli("init")[0], 0)
+        self.assertIn("role: student", self.note("Me.md"))
+
+    def test_bad_device_role_stops_init(self):
+        Path(os.environ["OMALOCKER_DEVICE_CONFIG"]).write_text('role = "wizard"\n')
+        with self.assertRaises(SystemExit) as e:
+            self.run_cli("init")
+        self.assertIn("wizard", str(e.exception))
+        self.assertFalse(self.locker.exists())
 
     def test_move_classes_leaves_a_link(self):
         self.run_cli("init")
@@ -620,6 +652,22 @@ class Views(Env):
         self.assertEqual(code, 1)
         self.assertIn("for a student's Locker", err)
         self.assertFalse(om.graduated_path().exists())
+
+    def test_push_for_the_timer_does_nothing_where_there_is_nothing_to_push(self):
+        code, _, err = self.run_cli("push")
+        self.assertEqual(code, 1)                      # by hand: say what's missing
+        self.assertIn("isn't set up", err)
+        self.assertEqual(self.run_cli("push", "--if-set-up")[0], 0)
+        self.edit("Me.md", "role: student", "role: teacher")
+        Path(os.environ["OMALOCKER_VIEWER_CONFIG"]).write_text(
+            'url = "https://viewer.example"\ntoken_file = "/nonexistent"\n')
+        code, out, _ = self.run_cli("push", "--if-set-up")
+        self.assertEqual(code, 0)
+        self.assertIn("not a student", out)
+        self.edit("Me.md", "role: teacher", "role: student")
+        self.run_cli("graduate", "--to", str(self.tmp / "usb"))
+        self.assertEqual(self.run_cli("push", "--if-set-up")[0], 0)
+        self.assertEqual(self.run_cli("push")[0], 1)
 
     def test_views_go_outside_the_locker(self):
         code, _, err = self.run_cli("views", "--out", str(self.locker / "views"))

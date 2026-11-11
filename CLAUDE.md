@@ -62,6 +62,10 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
   Resend + verified school domain + DPA.
 - 2026-11-10: big pushes go in parts (begin/part/commit, counts must add up, swapped in one
   transaction); tested live with an 8.8 MB fictional Locker. Run `init` after schema changes.
+- 2026-11-10: packaging: `make package` -> `omalocker` + `omalocker-viewer` (pkgbuild/, like
+  omamastery). User units on for everyone via preset: setup (init with role from
+  /etc/omalocker/omalocker.toml), backup timer, hourly push timer (`push --if-set-up`).
+  pacos side (package list, /etc files, locking .obsidian) is in docs/packaging.md, not done here.
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
   `docs/plan.md` (backup key, where the viewer runs, parent sign-in, custody records);

@@ -1,0 +1,11 @@
+[Unit]
+Description=Send this student's views to the OmaLocker viewer
+Documentation=https://github.com/seawolf-seno/omalocker/blob/main/docs/viewer.md
+ConditionPathExists=%h/Locker/Me.md
+
+[Service]
+Type=oneshot
+# Does nothing (and doesn't fail) without viewer settings, on a non-student
+# Locker, or after graduation.
+ExecStart=/usr/bin/omalocker push --if-set-up
+Nice=10

@@ -1,0 +1,4 @@
+# OmaLocker user units, on for every user (systemctl --global preset).
+enable omalocker-setup.service
+enable omalocker-backup.timer
+enable omalocker-push.timer

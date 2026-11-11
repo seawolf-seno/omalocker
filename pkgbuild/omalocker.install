@@ -1,0 +1,16 @@
+_units='omalocker-setup.service omalocker-backup.timer omalocker-push.timer'
+
+post_install() {
+  # Turn the user units on for every user, as the preset says. They start at each
+  # person's next login; each does nothing until its settings are in /etc/omalocker.
+  systemctl --global preset $_units >/dev/null 2>&1 || true
+  echo ">> OmaLocker: put this laptop's settings in /etc/omalocker/ (docs: /usr/share/doc/omalocker/packaging.md)"
+}
+
+post_upgrade() {
+  systemctl --global preset $_units >/dev/null 2>&1 || true
+}
+
+pre_remove() {
+  systemctl --global disable $_units >/dev/null 2>&1 || true
+}

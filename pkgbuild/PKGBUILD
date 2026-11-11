@@ -1,0 +1,45 @@
+# Built from this repo (like omamastery): `make package` from the repo root.
+pkgbase=omalocker
+pkgname=('omalocker' 'omalocker-viewer')
+pkgver=0.1.0
+pkgrel=1
+arch=('any')
+url='https://github.com/seawolf-seno/omalocker'
+license=('MIT')
+checkdepends=('python')
+source=()
+sha256sums=()
+
+check() {
+  cd "$startdir/.."
+  python3 -m unittest discover -s tests
+}
+
+package_omalocker() {
+  pkgdesc="Each person's school life as Markdown in ~/Locker: setup, class import, views, encrypted backup"
+  depends=('python>=3.11' 'restic')
+  optdepends=('obsidian: the app to open ~/Locker in')
+  install=omalocker.install
+  cd "$startdir/.."
+  install -Dm755 bin/omalocker "$pkgdir/usr/bin/omalocker"
+  install -d "$pkgdir/usr/share/omalocker"
+  cp -r --no-preserve=ownership template "$pkgdir/usr/share/omalocker/template"
+  chmod -R u=rwX,go=rX "$pkgdir/usr/share/omalocker"
+  for unit in omalocker-setup.service omalocker-backup.service omalocker-backup.timer \
+              omalocker-push.service omalocker-push.timer; do
+    install -Dm644 "systemd/$unit" "$pkgdir/usr/lib/systemd/user/$unit"
+  done
+  install -Dm644 systemd/80-omalocker.preset "$pkgdir/usr/lib/systemd/user-preset/80-omalocker.preset"
+  for doc in packaging.md backup.md graduation.md format.md viewer.md; do
+    install -Dm644 "docs/$doc" "$pkgdir/usr/share/doc/omalocker/$doc"
+  done
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/omalocker/LICENSE"
+}
+
+package_omalocker-viewer() {
+  pkgdesc='Admin command line for the OmaLocker viewer: people, grants, sign-in links, access log'
+  depends=('python>=3.11')
+  cd "$startdir/.."
+  install -Dm755 viewer/omalocker-viewer "$pkgdir/usr/bin/omalocker-viewer"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/omalocker-viewer/LICENSE"
+}

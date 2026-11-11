@@ -9,7 +9,7 @@ Python stdlib only. See docs/format.md for the note format.
   omalocker backup [--if-due | --status]
   omalocker restore [--to DIR] [--snapshot ID]
   omalocker views [--out DIR]
-  omalocker push
+  omalocker push [--if-set-up]
   omalocker graduate --to DIR
   omalocker doctor [--show-names] [--json]
 
@@ -227,7 +227,8 @@ def template_dir():
     here = Path(__file__).resolve().parent
     for candidate in (
         os.environ.get("OMALOCKER_TEMPLATE"),
-        here.parent / "template",
+        here.parent / "template",                        # running from the repo
+        here.parent / "share" / "omalocker" / "template",  # installed: /usr/bin -> /usr/share
         "/usr/share/omalocker/template",
     ):
         if candidate and Path(candidate, "Home.md").exists():
@@ -237,9 +238,28 @@ def template_dir():
 
 # ---------------------------------------------------------------- init
 
+def device_config():
+    """/etc/omalocker/omalocker.toml, written by pacos: what this laptop is for.
+    Today just `role` (student, teacher, ...), the default for `omalocker init`."""
+    path = Path(os.environ.get("OMALOCKER_DEVICE_CONFIG") or "/etc/omalocker/omalocker.toml")
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        sys.exit(f"omalocker: can't read {path}: {e}")
+
+
 def cmd_init(args):
     locker = Path(args.locker or default_locker()).expanduser()
     template = template_dir()
+    if not args.role:
+        role = device_config().get("role")
+        if role is not None and role not in ROLES:
+            sys.exit(f"omalocker: role {role!r} in the device settings isn't one of "
+                     f"{', '.join(sorted(ROLES))}")
+        args.role = role
     created = []
     for src in sorted(template.rglob("*")):
         rel = src.relative_to(template)
@@ -1485,21 +1505,31 @@ def push_views(cfg, out):
 
 
 def cmd_push(args):
+    # --if-set-up (the hourly timer): a laptop with nothing to push isn't an error.
+    quiet = 0 if args.if_set_up else 1
     locker = Path(args.locker or default_locker()).expanduser()
     if not locker.is_dir():
         print(f"omalocker: no Locker at {locker}", file=sys.stderr)
-        return 1
+        return quiet
     done = graduated()
     if done:
         print(f"omalocker: this Locker graduated on {done['graduated'][:10]}; "
               "views aren't sent any more", file=sys.stderr)
-        return 1
+        return quiet
+    if args.if_set_up:
+        try:
+            me, _ = read_note(locker / "Me.md")
+        except (OSError, FormatError):
+            me = None
+        if (me or {}).get("role") != "student":
+            print("omalocker: not a student's Locker; nothing to push")
+            return 0
     try:
         cfg = viewer_config()
         if cfg is None:
             print("omalocker: the viewer isn't set up on this device "
                   "(/etc/omalocker/viewer.toml; see docs/viewer.md)", file=sys.stderr)
-            return 1
+            return quiet
         out = views_dir()
         _, skipped, as_of = build_views(locker, out)
         result = push_views(cfg, out)
@@ -1814,7 +1844,8 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("init", help="set up ~/Locker from the template; never overwrites")
-    p.add_argument("--role", choices=sorted(ROLES), help="fills in role on Me.md")
+    p.add_argument("--role", choices=sorted(ROLES),
+                   help="fills in role on Me.md (default: role in /etc/omalocker/omalocker.toml)")
     p.add_argument("--move-classes", action="store_true",
                    help="move ~/Classes into the Locker and leave a link at ~/Classes")
     p.set_defaults(func=cmd_init)
@@ -1844,6 +1875,9 @@ def main(argv=None):
     p.set_defaults(func=cmd_views)
 
     p = sub.add_parser("push", help="build the views and send them to the viewer")
+    p.add_argument("--if-set-up", action="store_true",
+                   help="for the timer: do nothing (and don't fail) on a laptop that has "
+                        "no viewer settings, isn't a student's, or has graduated")
     p.set_defaults(func=cmd_push)
 
     p = sub.add_parser("graduate", help="hand the student their Locker; stop pushing and backups")

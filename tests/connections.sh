@@ -7,6 +7,7 @@ omalocker="$repo/bin/omalocker"
 export HOME=$(mktemp -d)
 unset OMALOCKER_LOCKER OMALOCKER_NOW XDG_CONFIG_HOME XDG_STATE_HOME XDG_CACHE_HOME XDG_DATA_HOME
 export OMALOCKER_BACKUP_CONFIG="$HOME/backup.toml"   # never /etc or the real ~/.config
+export OMALOCKER_DEVICE_CONFIG="$HOME/omalocker.toml"
 trap 'chmod -R u+rwx "$HOME"; rm -rf "$HOME"' EXIT
 step() { printf '\n== %s\n' "$*"; }
 

@@ -1,0 +1,13 @@
+[Unit]
+Description=Set up ~/Locker the first time this person logs in
+Documentation=https://github.com/seawolf-seno/omalocker/blob/main/docs/packaging.md
+# Never touches an existing Locker (init never overwrites anyway).
+ConditionPathExists=!%h/Locker/Home.md
+
+[Service]
+Type=oneshot
+# The role (student, teacher, ...) comes from /etc/omalocker/omalocker.toml.
+ExecStart=/usr/bin/omalocker init
+
+[Install]
+WantedBy=default.target
