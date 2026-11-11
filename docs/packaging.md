@@ -96,6 +96,9 @@ addresses)
       `omalocker-viewer audit --limit 3` on seno's laptop shows the push.
 - [ ] Student: open the Locker in Obsidian; turning on community plugins fails.
 - [ ] Teacher: `systemctl --user start omalocker-push.service` succeeds and pushes nothing.
+- [ ] Student: finish PacTerminus, then `systemctl --user start omalocker-push.service`;
+      `~/Locker/Pathway/Milestones/<today> Finished PacTerminus.md` exists and the
+      milestone is on the first page of the parent view.
 
 **7. When it passes**
 - [ ] Note it on Fizzy card 50 and tick the "Phase 2: pacos package" step.
