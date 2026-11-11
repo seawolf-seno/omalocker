@@ -151,8 +151,16 @@ def parse_props(lines):
     return props
 
 
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def one_line(value):
+    """Text from elsewhere (the viewer, Canvas titles) as one safe line."""
+    return CONTROL_RE.sub(" ", str(value or "")).strip()
+
+
 def _scalar(value):
-    s = str(value)
+    s = one_line(value)  # a property is one line: a newline must never start another
     plain = re.fullmatch(r"[\w./()+-][\w ./()+&,'-]*", s) and not s.endswith(" ")
     if plain and s.lower() not in ("true", "false", "null", "yes", "no", "on", "off"):
         return s
@@ -192,7 +200,7 @@ def link_target(value):
 
 
 def note_name(name):
-    name = re.sub(r"\s*:\s+", " - ", name)
+    name = re.sub(r"\s*:\s+", " - ", one_line(name))
     return UNSAFE_NAME.sub("-", name).strip().strip(".") or "Untitled"
 
 
@@ -1770,11 +1778,12 @@ def mastery_block(c, locker):
             return link(note_name(name))
         return name or ""
     lines = ["| Core idea | Latest level |", "|---|---|"]
-    lines += [f"| {idea_cell(i['name'])} | {i['level']} |" for i in c.get("ideas", [])]
+    lines += [f"| {idea_cell(i['name'])} | {i['level'] if i.get('level') in LEVELS else ''} |"
+              for i in c.get("ideas", [])]
     if c.get("objectives"):
         lines += ["", "| Learning target | Core idea | Level |", "|---|---|---|"]
-        lines += [f"| {o['title'].replace('|', '/')} | {idea_cell(o.get('idea'))} | {o['level']} |"
-                  for o in c["objectives"]]
+        lines += [f"| {one_line(o['title']).replace('|', '/')} | {idea_cell(o.get('idea'))} | "
+                  f"{o['level'] if o.get('level') in LEVELS else ''} |" for o in c["objectives"]]
     return "\n".join(lines)
 
 
@@ -1815,10 +1824,10 @@ def work_stubs_from_teacher(locker, cls, c):
     changed = 0
     for a in assignments:
         title = note_name(str(a.get("title") or a.get("id") or "Assignment"))
-        url = a.get("url")
+        url = a.get("url") if ASSIGNMENT_URL.match(str(a.get("url") or "")) else None
         path = by_link.get(url) if url else None
         path = path or folder / f"{title}.md"
-        week = f", week of {a['week']}" if a.get("week") else ""
+        week = f", week of {one_line(a['week'])}" if a.get("week") else ""
         where = f": {url}" if url else ""
         block = f"Canvas assignment{week}{where}"
         if path.exists():
@@ -1879,7 +1888,7 @@ def cmd_pull_levels(args):
                 continue
             props = props or {}
         else:
-            teacher = c.get("teacher") or "your teacher"
+            teacher = one_line(c.get("teacher")) or "your teacher"
             props, body = {}, (f"# {cls}: mastery\n\nFrom {teacher}. Read-only: changes come "
                                "from the teacher.\n")
         props.update(owned)

@@ -85,6 +85,11 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
 - 2026-11-10: Canvas assignments -> Work/<class>/ notes: from plan.toml `canvas_assignment` +
   connect.toml `canvas_url` + class.toml `canvas_course`, sent with levels; stubs never
   overwrite the student's work (matched by link, then title). No Canvas token needed.
+- 2026-11-11: security review fixes: text from the viewer or Canvas is one line before it
+  reaches a property or note name (no injected properties); parent and teacher views show
+  the teacher's own levels, not the student's editable copy; forms refuse other sites
+  (Origin / Sec-Fetch-Site); anonymous refusals logged once per 10 s; staged pushes capped
+  (20,000 notes, 128 MB); NUL bytes can't break a page; `share:` lists in any YAML style.
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
   `docs/plan.md` (backup key, where the viewer runs, parent sign-in, custody records);

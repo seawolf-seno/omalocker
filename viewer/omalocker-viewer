@@ -184,13 +184,23 @@ def digest(token):
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+AUDIT_QUIET_SECONDS = 10
+
+
 def audit(db, actor, action, student_id=None, audience="", scope="", path="",
           result="ok", detail=""):
-    """Append one access-log entry. actor: a people row, or a label like 'device'."""
+    """Append one access-log entry. actor: a people row, or a label like 'device'.
+    Refusals nobody signed in for (bad tokens, used links, unknown addresses) are kept
+    once per kind every few seconds, so a script can't grow the log without limit."""
     if hasattr(actor, "keys"):
         actor_id, label = actor["id"], actor["email"]
     else:
         actor_id, label = None, str(actor)
+        if result != "ok" and label in ("device", "unknown") and db.execute(
+                "SELECT 1 FROM audit WHERE actor_id IS NULL AND actor = ? AND action = ? AND "
+                "result = ? AND detail = ? AND at > ? LIMIT 1",
+                (label, action, result, detail, clock() - AUDIT_QUIET_SECONDS)).fetchone():
+            return
     db.execute("INSERT INTO audit (at, actor_id, actor, action, student_id, audience, scope, "
                "path, result, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                (clock(), actor_id, label, action, student_id, audience, scope or "",
@@ -492,8 +502,8 @@ def frontmatter(text):
                 props[key] = value.strip("'\"")
             else:
                 props[key] = []
-        elif key and re.match(r"\s+-\s*", line) and isinstance(props.get(key), list):
-            props[key].append(re.sub(r"^\s+-\s*", "", line).strip().strip("'\""))
+        elif key and re.match(r"\s*-(\s|$)", line) and isinstance(props.get(key), list):
+            props[key].append(re.sub(r"^\s*-\s*", "", line).strip().strip("'\""))
     return props
 
 
@@ -601,6 +611,8 @@ def accept_push(db, student_id, payload):
 
 UPLOAD_TTL = 3600
 MAX_PART = 4 * 1024 * 1024
+MAX_STAGED_NOTES = 20000
+MAX_STAGED_BYTES = 128 * 1024 * 1024
 
 
 def push_begin(db, student_id):
@@ -633,6 +645,11 @@ def push_part(db, student_id, payload):
         audience, scope, _ = check_view_header(v)
         rows += [(upload, student_id, audience, scope, *n)
                  for n in check_notes(audience, v.get("notes"))]
+    have = db.execute("SELECT COUNT(*), COALESCE(SUM(LENGTH(text)), 0) FROM push_staging "
+                      "WHERE upload = ?", (upload,)).fetchone()
+    if (have[0] + len(rows) > MAX_STAGED_NOTES
+            or have[1] + sum(len(r[-1]) for r in rows) > MAX_STAGED_BYTES):
+        raise ViewerError("this push is too big for the viewer")
     try:
         db.executemany("INSERT INTO push_staging VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
     except sqlite3.IntegrityError:
@@ -778,6 +795,13 @@ def accept_levels(db, teacher, payload):
             "not_yours": not_granted}
 
 
+def teacher_levels(db, student_id):
+    """{class name (lowercase): {"teacher", "as_of", "ideas", "objectives"}} as the
+    teachers sent them. Views show these, not the student's copy, so levels can't be
+    edited on the student's laptop on their way to a parent."""
+    return {c["class"].lower(): c for c in levels_for(db, student_id)["classes"]}
+
+
 def levels_for(db, student_id):
     rows = db.execute(
         "SELECT l.*, p.name AS teacher FROM levels l LEFT JOIN people p ON p.id = l.teacher_id "
@@ -811,6 +835,7 @@ def inline(text, resolve):
 
 
 def inline_plain(text):
+    text = text.replace("\0", "")
     parts = re.split(r"(`[^`]+`)", text)
     out = []
     for part in parts:
@@ -841,6 +866,7 @@ def split_front(text):
 
 
 def render_markdown(text, resolve, title=None):
+    text = text.replace("\0", "")  # the renderer uses NUL as a placeholder
     front, body = split_front(text)
     body = re.sub(r"<!--.*?-->", "", body, flags=re.S)
     out = []
@@ -1090,6 +1116,29 @@ def mastery_levels(text):
     return rows
 
 
+def mastery_class(path):
+    return path.rsplit("/", 1)[-1].removesuffix(".md")
+
+
+def official_mastery_html(c, resolve):
+    """A mastery page from the teacher's own levels (the levels table)."""
+    def idea(name):
+        return inline(f"[[{name}]]", resolve) if name else ""
+    ideas = "".join(f"<tr><td>{idea(i['name'])}</td><td>{esc(i['level'])}</td></tr>"
+                    for i in c["ideas"])
+    targets = "".join(f"<tr><td>{esc(o['title'])}</td><td>{idea(o.get('idea'))}</td>"
+                      f"<td>{esc(o['level'])}</td></tr>" for o in c["objectives"])
+    when = f", as of {esc(nice_date(c['as_of']))}" if c.get("as_of") else ""
+    out = (f"<h2>{esc(c['class'])}: mastery</h2>"
+           f'<p class="muted">From {esc(c["teacher"])}{when}.</p>'
+           "<table><thead><tr><th>Core idea</th><th>Latest level</th></tr></thead>"
+           f"<tbody>{ideas}</tbody></table>")
+    if targets:
+        out += ("<table><thead><tr><th>Learning target</th><th>Core idea</th><th>Level</th></tr>"
+                f"</thead><tbody>{targets}</tbody></table>")
+    return out
+
+
 def page(cfg, title, body, person=None):
     staging = '<div class="staging">Test version · made-up people only</div>' \
         if cfg["env"] == "staging" else ""
@@ -1306,6 +1355,7 @@ class Viewer:
         first_page = audience == "parent" and not show_all
         shown = [n for n in notes if n["summary"]] if first_page else notes
         base = view_url(student["id"], audience, scope)
+        from_teacher = teacher_levels(self.db, student["id"])
         sections = {}
         for n in shown:
             if first_page and n["path"] == "Me.md":
@@ -1324,9 +1374,14 @@ class Viewer:
                 sub = note_sub(n["type"], props, n["text"])
                 extra = ""
                 if n["type"] == "mastery":
+                    official = from_teacher.get(mastery_class(n["path"]).lower())
+                    rows = ([(i["name"], i["level"]) for i in official["ideas"]] if official
+                            else mastery_levels(n["text"]))
                     extra = "".join(f'<li><span>{esc(idea)}</span><span class="level">{esc(lvl)}</span></li>'
-                                    for idea, lvl in mastery_levels(n["text"]))
+                                    for idea, lvl in rows)
                     extra = f'<ul class="levels">{extra}</ul>' if extra else ""
+                    sub = (f"From {official['teacher']}" if official
+                           else "From the student's laptop (no levels from the teacher yet)")
                 items.append(
                     f'<li><a class="card" href="{note_url(base, n["path"])}">'
                     f'<div class="title">{esc(note_title(n["path"], n["type"]))}</div>'
@@ -1362,10 +1417,16 @@ class Viewer:
 
         back = base + ("" if audience != "parent" or note["summary"] else "?all=1")
         title = note_title(path, note["type"])
+        content = render_markdown(note["text"], resolve, title)
+        if note["type"] == "mastery":
+            official = teacher_levels(self.db, student["id"]).get(mastery_class(path).lower())
+            content = (official_mastery_html(official, resolve) if official else
+                       '<p class="muted">From the student\'s laptop: no levels from the teacher '
+                       "yet.</p>" + content)
         body = (self.view_header(person, student, audience, scope, v,
                                  (back, "Back to " + ("everything" if back.endswith("all=1")
                                                       else "the overview")))
-                + "<article>" + render_markdown(note["text"], resolve, title) + "</article>")
+                + "<article>" + content + "</article>")
         return page(self.cfg, title, body, person)
 
 
@@ -1543,6 +1604,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 audit(v.db, "device", "push", student_id,
                       detail=f"{result['views']} views, {result['notes']} notes{parts}")
             return self.send(200, json.dumps({"ok": True, **result}), "application/json")
+        # Forms (sign in, email a link, sign out) only from this site's own pages: no
+        # other site can sign a visitor in to someone's account or send links.
+        site = (self.headers.get("Sec-Fetch-Site") or "").lower()
+        origin = self.headers.get("Origin")
+        if site == "cross-site" or (origin and origin != "null"
+                                    and urllib.parse.urlsplit(origin).netloc != self.headers.get("Host")):
+            return self.send(403, page(v.cfg, "Not allowed", "<h1>Not allowed</h1><p>That "
+                                       "form has to be sent from this site.</p>"))
         raw = self.read_body(4096)
         form = urllib.parse.parse_qs((raw or b"").decode(errors="replace"))
         if path == "/signin":

@@ -585,6 +585,84 @@ class Viewer(unittest.TestCase):
         self.assertEqual(status, 422)
         self.assertIn("Canvas assignment", r["error"])
 
+    # -- security review (2026-11-10)
+    def test_parents_see_the_teachers_levels_not_the_students_copy(self):
+        mastery = self.locker / "Mastery" / "Biology.md"
+        mastery.write_text(mastery.read_text().replace("| Developing |", "| Extending |"))
+        self.push()
+        parent = self.browser("parent")
+        _, body = self.get(parent, self.url("parent"))
+        self.assertIn("no levels from the teacher yet", body)   # honest about the source
+        classes = self.teacher_classes()
+        token = self.admin("push-token", PEOPLE["biology"]).strip()
+        self.as_device(token, "--locker", str(self.tmp / "teacher" / "Locker"),
+                       "send-levels", "--classes", str(classes))
+        mastery.write_text(mastery.read_text().replace("| Proficient |", "| Extending |"))
+        self.push()                                                # student's copy is forged
+        _, body = self.get(parent, self.url("parent"))
+        levels = re.findall(r'<span>([^<]*)</span><span class="level">([^<]*)</span>', body)
+        self.assertEqual(dict(levels), {"Feedback loops in ecosystems": "Developing",
+                                        "Cellular respiration": "Extending"})
+        _, page_ = self.get(parent, self.url("parent", note="Mastery/Biology.md"))
+        self.assertIn("Model a predator-prey loop", page_)     # teacher's targets, not the copy
+        self.assertNotIn("Copied from", page_)
+
+    def test_forms_only_from_this_site(self):
+        link = self.admin("sign-in-link", PEOPLE["parent"]).strip()
+        token = urllib.parse.parse_qs(urllib.parse.urlsplit(link).query)["t"][0]
+        for headers in ({"Sec-Fetch-Site": "cross-site"}, {"Origin": "https://evil.example"}):
+            req = urllib.request.Request(self.base + "/signin", headers=headers,
+                                         data=urllib.parse.urlencode({"t": token}).encode())
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(req)
+            self.assertEqual(e.exception.code, 403)
+            e.exception.close()
+        own = urllib.request.Request(self.base + "/signin/email", headers={
+            "Origin": self.base, "Sec-Fetch-Site": "same-origin"},
+            data=urllib.parse.urlencode({"email": PEOPLE["parent"]}).encode())
+        with urllib.request.urlopen(own) as r:
+            self.assertEqual(r.status, 200)
+        self.post(self.browser(), "/signin", {"t": token}, expect=303)   # link still unused
+
+    def test_refusals_nobody_signed_in_for_dont_flood_the_log(self):
+        for _ in range(5):
+            self.raw_push({"views": []}, token="z" * 43)
+            self.post(self.browser(), "/signin", {"t": "y" * 43})
+        log = self.audit_log("--denied")
+        self.assertEqual(len([e for e in log if e["action"] == "push"]), 1)
+        self.assertEqual(len([e for e in log if e["action"] == "sign-in"]), 1)
+
+    def test_a_nul_in_a_note_doesnt_break_the_page(self):
+        note = self.locker / "Journal" / "2026-11-10.md"
+        note.write_text(note.read_text() + "\nodd \x007\x00 bytes [x](https://example.org)\n")
+        self.push()
+        status, body = self.get(self.browser("parent"), self.url("parent", note="Journal/2026-11-10.md"))
+        self.assertEqual(status, 200)
+        self.assertIn("odd 7 bytes", body)
+
+    def test_one_upload_cant_stage_without_limit(self):
+        view = {"audience": "parent", "scope": None, "as_of": "x"}
+        upload = self.raw_push({}, path="/api/push/begin")[1]["upload"]
+        notes = [{"path": f"Journal/n{i}.md", "text": "---\ntype: journal\n---\nhi\n"} for i in range(3)]
+        old = vw.MAX_STAGED_NOTES
+        vw.MAX_STAGED_NOTES = 4
+        try:
+            self.assertEqual(self.raw_push({"upload": upload, "views": [{**view, "notes": notes}]},
+                                           path="/api/push/part")[0], 200)
+            status, r = self.raw_push({"upload": upload, "views": [{**view, "notes": [
+                {"path": "Journal/x.md", "text": "a"}, {"path": "Journal/y.md", "text": "b"}]}]},
+                path="/api/push/part")
+        finally:
+            vw.MAX_STAGED_NOTES = old
+        self.assertEqual(status, 422)
+        self.assertIn("too big", r["error"])
+
+    def test_viewer_refuses_private_in_any_yaml_list_style(self):
+        view = {"audience": "parent", "scope": None, "as_of": "x"}
+        status, _ = self.raw_push({"views": [{**view, "notes": [
+            {"path": "Inbox/z.md", "text": "---\ntype: inbox\nshare:\n- private\n---\nsecret\n"}]}]})
+        self.assertEqual(status, 422)
+
     def test_sign_out_ends_the_session(self):
         self.push()
         parent = self.browser("parent")

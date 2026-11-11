@@ -94,6 +94,13 @@ class Frontmatter(unittest.TestCase):
         with self.assertRaises(om.FormatError):
             om.parse_props(["type: idea", "type: joint"])
 
+    def test_text_from_elsewhere_stays_on_one_line(self):
+        # Security review: a newline in a value from the viewer must not add a property.
+        out = om.dump_props({"type": "work", "canvas_assignment": "x\nshare: []"})
+        lines, _ = om.split_note(out)
+        self.assertEqual(sorted(om.parse_props(lines)), ["canvas_assignment", "type"])
+        self.assertEqual(om.note_name("Lab\nreport\x00"), "Lab report")
+
     def test_note_names(self):
         self.assertEqual(om.note_name("Geometry: Proof & Space"), "Geometry - Proof & Space")
         self.assertEqual(om.note_name("Advanced CS w/ AI Agents"), "Advanced CS w- AI Agents")
