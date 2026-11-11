@@ -154,9 +154,9 @@ class Viewer(unittest.TestCase):
             self.assertEqual(status, expect)
         return status
 
-    def raw_push(self, payload, token=None):
+    def raw_push(self, payload, token=None, path="/api/push"):
         token = token or (self.tmp / "push-key").read_text().strip()
-        req = urllib.request.Request(self.base + "/api/push", data=json.dumps(payload).encode(),
+        req = urllib.request.Request(self.base + path, data=json.dumps(payload).encode(),
                                      headers={"Authorization": f"Bearer {token}"})
         try:
             with urllib.request.urlopen(req) as r:
@@ -370,6 +370,72 @@ class Viewer(unittest.TestCase):
         self.assertEqual(mail["to"], ["jordan@fictional-school.org"])
         self.assertIn("/signin?t=", mail["text"])
         self.assertEqual(self.outbox(), [])
+
+    def stored_notes(self):
+        db = vw.connect(self.target)
+        try:
+            return sorted((r["audience"], r["scope"], r["path"], r["summary"], r["text"])
+                          for r in db.execute("SELECT * FROM notes"))
+        finally:
+            db.close()
+
+    def test_large_push_goes_in_parts_with_the_same_result(self):
+        code, out, _ = self.push()
+        self.assertNotIn("parts", out)
+        whole = self.stored_notes()
+        os.environ["OMALOCKER_PUSH_PART_BYTES"] = "6000"
+        code, out, err = self.push()
+        self.assertEqual(code, 0, err)
+        self.assertRegex(out, r"Pushed 8 views \(67 notes\) as of .* in \d+ parts")
+        self.assertGreater(int(re.search(r"in (\d+) parts", out).group(1)), 3)
+        self.assertEqual(self.stored_notes(), whole)
+        self.assertIn("67 notes in parts", json.dumps(self.audit_log()))
+        db = vw.connect(self.target)
+        try:  # nothing left waiting
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM push_staging").fetchone()[0], 0)
+        finally:
+            db.close()
+        teacher = self.browser("biology")
+        self.assertEqual(self.get(teacher, self.url(
+            "teacher", "Biology", "Work/Biology/Lab report - yeast respiration.md"))[0], 200)
+
+    def test_parts_that_dont_add_up_change_nothing(self):
+        self.push()
+        before = self.stored_notes()
+        view = {"audience": "parent", "scope": None, "as_of": "2026-11-11T00:00:00+00:00"}
+        note = {"path": "Me.md", "type": "person", "summary": True, "text": "---\ntype: person\n---\n"}
+        status, r = self.raw_push({}, path="/api/push/begin")
+        self.assertEqual(status, 200)
+        upload = r["upload"]
+        self.assertEqual(self.raw_push({"upload": upload, "views": [{**view, "notes": [note]}]},
+                                       path="/api/push/part")[0], 200)
+        # Says 2 notes, sent 1.
+        status, r = self.raw_push({"upload": upload, "views": [{**view, "count": 2}]},
+                                  path="/api/push/commit")
+        self.assertEqual(status, 422)
+        self.assertIn("don't add up", r["error"])
+        # A refused note in a part is turned away too.
+        bad = {**note, "path": "Inbox/x.md", "text": "---\ntype: inbox\nshare: [private]\n---\n"}
+        self.assertEqual(self.raw_push({"upload": upload, "views": [{**view, "notes": [bad]}]},
+                                       path="/api/push/part")[0], 422)
+        self.assertEqual(self.stored_notes(), before)
+        # Another student's token can't touch this upload.
+        self.admin("person", "add", "--name", "Other", "--email", "other@student.example.org",
+                   "--student")
+        other = self.admin("push-token", "other@student.example.org").strip()
+        status, r = self.raw_push({"upload": upload, "views": [{**view, "count": 1}]},
+                                  token=other, path="/api/push/commit")
+        self.assertEqual(status, 422)
+        self.assertIn("unknown or expired upload", r["error"])
+        self.assertEqual(self.stored_notes(), before)
+        # Graduation clears what was left waiting.
+        self.admin("graduate", STUDENT, "--yes")
+        db = vw.connect(self.target)
+        try:
+            for table in ("push_staging", "push_uploads"):
+                self.assertEqual(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
+        finally:
+            db.close()
 
     def test_sign_out_ends_the_session(self):
         self.push()

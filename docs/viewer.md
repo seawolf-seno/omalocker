@@ -59,8 +59,14 @@ Things Vercel needs that aren't obvious:
   an upgrade: it adds missing tables and leaves settings alone.
 - **Tests:** every viewer test runs twice, on a SQLite file and through a fake Turso server
   (`tests/fake_turso.py`), and `api/index.py` is loaded the way Vercel loads it.
-- **Limits:** a Vercel function takes at most 4.5 MB per request, so a very large Locker's
-  push will need splitting later.
+- **Big pushes:** a Vercel function takes at most 4.5 MB per request. `omalocker push` sends
+  a push that fits in one request (`/api/push`); a bigger one goes in parts:
+  `/api/push/begin` returns an upload id tied to the student's push token, `/api/push/part`
+  sends notes about 3 MB at a time (each checked as usual and held in `push_staging`), and
+  `/api/push/commit` lists every view with its note count. Only if the parts add up exactly
+  are the old views swapped for the new ones, in one transaction, so a parent never sees half
+  a push. A new upload replaces an unfinished one; unfinished uploads expire after an hour;
+  graduation clears them. Tested live with an 8.8 MB fictional Locker (3 parts).
 - **Deleted data:** locally, graduation overwrites deleted rows (`secure_delete`, `VACUUM`).
   Turso keeps point-in-time backups, so deleted rows stay in its backups until they age out;
   check Turso's retention with IT before real data.

@@ -60,6 +60,8 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
   per address, 200/hour site; Resend API (stdlib); staging and test addresses go to the
   `outbox` table instead (`omalocker-viewer outbox`). Live on staging. Real sending needs
   Resend + verified school domain + DPA.
+- 2026-11-10: big pushes go in parts (begin/part/commit, counts must add up, swapped in one
+  transaction); tested live with an 8.8 MB fictional Locker. Run `init` after schema changes.
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
   `docs/plan.md` (backup key, where the viewer runs, parent sign-in, custody records);

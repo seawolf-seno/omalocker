@@ -1416,14 +1416,36 @@ def viewer_config():
     return None
 
 
+# A push bigger than this goes in parts (Vercel takes at most 4.5 MB per request).
+PUSH_PART_BYTES = 3 * 1024 * 1024
+
+
 def push_views(cfg, out):
     import urllib.error
     import urllib.request
-    url = str(cfg["url"]).rstrip("/") + "/api/push"
-    parts = urllib.parse.urlsplit(url)
+    base = str(cfg["url"]).rstrip("/")
+    parts = urllib.parse.urlsplit(base)
     if parts.scheme != "https" and parts.hostname not in ("localhost", "127.0.0.1", "::1"):
         raise ViewError("the viewer url must be https:// (student data never goes out unencrypted)")
     token = Path(str(cfg["token_file"])).expanduser().read_text().strip()
+    limit = int(os.environ.get("OMALOCKER_PUSH_PART_BYTES") or PUSH_PART_BYTES)
+
+    def post(path, payload):
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(base + path, data=body, method="POST", headers={
+            "Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            try:
+                msg = json.loads(e.read()).get("error")
+            except ValueError:
+                msg = None
+            raise ViewError(f"the viewer said {e.code}: {msg or e.reason}")
+        except urllib.error.URLError as e:
+            raise ViewError(f"can't reach the viewer: {e.reason}")
+
     views = []
     for manifest_path in sorted(out.rglob("view.json")):
         folder = manifest_path.parent
@@ -1431,20 +1453,35 @@ def push_views(cfg, out):
         for n in manifest["notes"]:
             n["text"] = (folder / n["path"]).read_text(encoding="utf-8")
         views.append(manifest)
-    body = json.dumps({"format": VIEW_FORMAT, "views": views}).encode()
-    req = urllib.request.Request(url, data=body, method="POST", headers={
-        "Authorization": f"Bearer {token}", "Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        try:
-            msg = json.loads(e.read()).get("error")
-        except ValueError:
-            msg = None
-        raise ViewError(f"the viewer said {e.code}: {msg or e.reason}")
-    except urllib.error.URLError as e:
-        raise ViewError(f"can't reach the viewer: {e.reason}")
+    whole = {"format": VIEW_FORMAT, "views": views}
+    if len(json.dumps(whole).encode()) <= limit:
+        return {**post("/api/push", whole), "parts": 1}
+
+    # Too big for one request: begin, send notes in parts, then commit with counts.
+    upload = post("/api/push/begin", {})["upload"]
+    header = lambda v: {k: v[k] for k in ("audience", "scope", "as_of")}
+    sent, batch, size = 0, {}, 0
+
+    def flush():
+        nonlocal batch, size, sent
+        if batch:
+            post("/api/push/part", {"upload": upload, "views": list(batch.values())})
+            sent += 1
+        batch, size = {}, 0
+
+    for v in views:
+        for n in v["notes"]:
+            note = {k: n[k] for k in ("path", "type", "summary", "text")}
+            cost = len(json.dumps(note).encode()) + 200
+            if size and size + cost > limit:
+                flush()
+            key = (v["audience"], v["scope"])
+            batch.setdefault(key, {**header(v), "notes": []})["notes"].append(note)
+            size += cost
+    flush()
+    result = post("/api/push/commit", {"upload": upload, "views": [
+        {**header(v), "count": len(v["notes"])} for v in views]})
+    return {**result, "parts": sent}
 
 
 def cmd_push(args):
@@ -1469,7 +1506,8 @@ def cmd_push(args):
     except (ViewError, OSError) as e:
         print(f"omalocker: {e}", file=sys.stderr)
         return 1
-    print(f"Pushed {result['views']} views ({result['notes']} notes) as of {as_of}")
+    parts = f" in {result['parts']} parts" if result.get("parts", 1) > 1 else ""
+    print(f"Pushed {result['views']} views ({result['notes']} notes) as of {as_of}{parts}")
     if skipped:
         print(f"  {skipped} note{'s' if skipped > 1 else ''} left out: frontmatter can't be read "
               "(run `omalocker doctor`)")

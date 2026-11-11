@@ -51,6 +51,7 @@ LINKS_PER_HOUR = 200  # the whole site: the form can't be used to flood inboxes
 RESEND_URL = "https://api.resend.com/emails"
 SESSION_TTL = 30 * 24 * 3600
 MAX_PUSH = 32 * 1024 * 1024
+PUSH_ROUTES = ("/api/push", "/api/push/begin", "/api/push/part", "/api/push/commit")
 MAX_NOTE = 1024 * 1024
 COOKIE = "olv_session"
 
@@ -114,6 +115,23 @@ CREATE TABLE IF NOT EXISTS notes (
 );
 -- Who opened what, and every change. No foreign keys: entries outlive the rows they
 -- mention, except at graduation (docs/viewer.md, "Access log").
+-- Pushes that come in parts wait here until commit (UPLOAD_TTL).
+CREATE TABLE IF NOT EXISTS push_uploads (
+  upload TEXT PRIMARY KEY,
+  student_id INTEGER NOT NULL,
+  started REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS push_staging (
+  upload TEXT NOT NULL,
+  student_id INTEGER NOT NULL,
+  audience TEXT NOT NULL,
+  scope TEXT NOT NULL DEFAULT '',
+  path TEXT NOT NULL,
+  type TEXT,
+  summary INTEGER NOT NULL DEFAULT 0,
+  text TEXT NOT NULL,
+  PRIMARY KEY (upload, audience, scope, path)
+);
 -- Mail that wasn't sent for real: staging, test addresses, or no mail service set up.
 CREATE TABLE IF NOT EXISTS outbox (
   id INTEGER PRIMARY KEY,
@@ -475,54 +493,149 @@ def clean_path(path):
     return path
 
 
-def accept_push(db, student_id, payload):
-    """Replace every view of this student with the pushed ones. Returns a summary."""
-    views = payload.get("views") if isinstance(payload, dict) else None
-    if not isinstance(views, list) or not views:
-        raise ViewerError("push has no views")
-    rows, seen = [], set()
-    for v in views:
-        audience, scope = v.get("audience"), v.get("scope") or ""
-        if audience not in AUDIENCES:
-            raise ViewerError(f"unknown audience {audience!r}")
-        if (audience in SCOPED) != bool(scope):
-            raise ViewerError(f"{audience} views {'need' if audience in SCOPED else 'have no'} scope")
-        if not isinstance(scope, str) or len(scope) > 200 or "/" in scope or scope.startswith("."):
-            raise ViewerError("bad scope")
-        if (audience, scope) in seen:
-            raise ViewerError(f"view {audience} {scope} sent twice")
-        seen.add((audience, scope))
-        as_of = v.get("as_of")
-        if not isinstance(as_of, str) or len(as_of) > 40:
-            raise ViewerError("every view needs as_of")
-        notes, paths = [], set()
-        for n in v.get("notes") or []:
-            path, text = clean_path(n.get("path")), n.get("text")
-            if path is None or not isinstance(text, str) or path in paths:
-                raise ViewerError("bad note path or text")
-            if len(text.encode()) > MAX_NOTE:
-                raise ViewerError(f"a note is over {MAX_NOTE // 1024} KB")
-            why = note_refused(path, text)
-            if why:
-                raise ViewerError(f"refused: the {audience} view holds {why}")
-            paths.add(path)
-            notes.append((path, str(n.get("type") or ""), 1 if n.get("summary") else 0, text))
-        rows.append((audience, scope, as_of, notes))
+def check_view_header(v):
+    """(audience, scope, as_of) of one pushed view, or ViewerError."""
+    if not isinstance(v, dict):
+        raise ViewerError("a view must be an object")
+    audience, scope = v.get("audience"), v.get("scope") or ""
+    if audience not in AUDIENCES:
+        raise ViewerError(f"unknown audience {audience!r}")
+    if (audience in SCOPED) != bool(scope):
+        raise ViewerError(f"{audience} views {'need' if audience in SCOPED else 'have no'} scope")
+    if not isinstance(scope, str) or len(scope) > 200 or "/" in scope or scope.startswith("."):
+        raise ViewerError("bad scope")
+    as_of = v.get("as_of")
+    if not isinstance(as_of, str) or len(as_of) > 40:
+        raise ViewerError("every view needs as_of")
+    return audience, scope, as_of
+
+
+def check_notes(audience, notes):
+    """[(path, type, summary, text)] for one view's pushed notes, or ViewerError."""
+    rows, paths = [], set()
+    for n in notes or []:
+        if not isinstance(n, dict):
+            raise ViewerError("a note must be an object")
+        path, text = clean_path(n.get("path")), n.get("text")
+        if path is None or not isinstance(text, str) or path in paths:
+            raise ViewerError("bad note path or text")
+        if len(text.encode()) > MAX_NOTE:
+            raise ViewerError(f"a note is over {MAX_NOTE // 1024} KB")
+        why = note_refused(path, text)
+        if why:
+            raise ViewerError(f"refused: the {audience} view holds {why}")
+        paths.add(path)
+        rows.append((path, str(n.get("type") or ""), 1 if n.get("summary") else 0, text))
+    return rows
+
+
+def replace_views(db, student_id, headers, fill):
+    """In one transaction: drop the student's views, add the new ones, and let fill()
+    insert their notes. Readers never see half a push."""
     pushed = clock()
     db.execute("BEGIN IMMEDIATE")
     try:
         db.execute("DELETE FROM notes WHERE student_id = ?", (student_id,))
         db.execute("DELETE FROM views WHERE student_id = ?", (student_id,))
-        for audience, scope, as_of, notes in rows:
-            db.execute("INSERT INTO views VALUES (?, ?, ?, ?, ?)",
-                       (student_id, audience, scope, as_of, pushed))
-            db.executemany("INSERT INTO notes VALUES (?, ?, ?, ?, ?, ?, ?)",
-                           [(student_id, audience, scope, *n) for n in notes])
+        db.executemany("INSERT INTO views VALUES (?, ?, ?, ?, ?)",
+                       [(student_id, a, s, as_of, pushed) for a, s, as_of in headers])
+        fill()
         db.execute("COMMIT")
     except BaseException:
         db.execute("ROLLBACK")
         raise
-    return {"views": len(rows), "notes": sum(len(r[3]) for r in rows)}
+
+
+def accept_push(db, student_id, payload):
+    """A whole push in one request: replace every view of this student."""
+    views = payload.get("views") if isinstance(payload, dict) else None
+    if not isinstance(views, list) or not views:
+        raise ViewerError("push has no views")
+    headers, notes, seen = [], [], set()
+    for v in views:
+        audience, scope, as_of = check_view_header(v)
+        if (audience, scope) in seen:
+            raise ViewerError(f"view {audience} {scope} sent twice")
+        seen.add((audience, scope))
+        headers.append((audience, scope, as_of))
+        notes += [(student_id, audience, scope, *n) for n in check_notes(audience, v.get("notes"))]
+    replace_views(db, student_id, headers,
+                  lambda: db.executemany("INSERT INTO notes VALUES (?, ?, ?, ?, ?, ?, ?)", notes))
+    return {"views": len(headers), "notes": len(notes)}
+
+
+# A push too big for one request (Vercel takes 4.5 MB) comes in parts:
+# begin -> part ... -> commit. Parts wait in push_staging; commit checks that every
+# view arrived whole, then swaps them in at once. Unfinished uploads expire.
+
+UPLOAD_TTL = 3600
+MAX_PART = 4 * 1024 * 1024
+
+
+def push_begin(db, student_id):
+    db.execute("DELETE FROM push_staging WHERE upload IN "
+               "(SELECT upload FROM push_uploads WHERE started < ?)", (clock() - UPLOAD_TTL,))
+    db.execute("DELETE FROM push_uploads WHERE started < ?", (clock() - UPLOAD_TTL,))
+    # One upload at a time per student: a new one replaces any left unfinished.
+    db.execute("DELETE FROM push_staging WHERE student_id = ?", (student_id,))
+    db.execute("DELETE FROM push_uploads WHERE student_id = ?", (student_id,))
+    upload = secrets.token_urlsafe(24)
+    db.execute("INSERT INTO push_uploads VALUES (?, ?, ?)", (upload, student_id, clock()))
+    return upload
+
+
+def own_upload(db, student_id, upload):
+    row = db.execute("SELECT started FROM push_uploads WHERE upload = ? AND student_id = ?",
+                     (str(upload or ""), student_id)).fetchone()
+    if not row or row["started"] < clock() - UPLOAD_TTL:
+        raise ViewerError("unknown or expired upload: start the push again")
+
+
+def push_part(db, student_id, payload):
+    upload = payload.get("upload") if isinstance(payload, dict) else None
+    own_upload(db, student_id, upload)
+    views = payload.get("views")
+    if not isinstance(views, list) or not views:
+        raise ViewerError("part has no views")
+    rows = []
+    for v in views:
+        audience, scope, _ = check_view_header(v)
+        rows += [(upload, student_id, audience, scope, *n)
+                 for n in check_notes(audience, v.get("notes"))]
+    try:
+        db.executemany("INSERT INTO push_staging VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    except sqlite3.IntegrityError:
+        raise ViewerError("a note was sent twice")
+    return {"notes": len(rows)}
+
+
+def push_commit(db, student_id, payload):
+    upload = payload.get("upload") if isinstance(payload, dict) else None
+    own_upload(db, student_id, upload)
+    views = payload.get("views")
+    if not isinstance(views, list) or not views:
+        raise ViewerError("push has no views")
+    headers, expected = [], {}
+    for v in views:
+        audience, scope, as_of = check_view_header(v)
+        if (audience, scope) in expected:
+            raise ViewerError(f"view {audience} {scope} sent twice")
+        count = v.get("count")
+        if not isinstance(count, int) or count < 0:
+            raise ViewerError("every view needs its note count")
+        expected[(audience, scope)] = count
+        headers.append((audience, scope, as_of))
+    got = {(r["audience"], r["scope"]): r["n"] for r in db.execute(
+        "SELECT audience, scope, COUNT(*) AS n FROM push_staging WHERE upload = ? "
+        "GROUP BY audience, scope", (upload,))}
+    if any(got.get(k, 0) != n for k, n in expected.items()) or set(got) - set(expected):
+        raise ViewerError("the parts don't add up to the views: nothing changed, push again")
+    replace_views(db, student_id, headers, lambda: (
+        db.execute("INSERT INTO notes SELECT student_id, audience, scope, path, type, summary, "
+                   "text FROM push_staging WHERE upload = ?", (upload,)),
+        db.execute("DELETE FROM push_staging WHERE upload = ?", (upload,)),
+        db.execute("DELETE FROM push_uploads WHERE upload = ?", (upload,))))
+    return {"views": len(headers), "notes": sum(expected.values())}
 
 
 # ---------------------------------------------------------------- markdown
@@ -1219,22 +1332,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         v = self.viewer
         path = urllib.parse.urlsplit(self.path).path
-        if path == "/api/push":
+        if path in PUSH_ROUTES:
             student_id = v.push_student(self.headers.get("Authorization"))
             if student_id is None:
                 audit(v.db, "device", "push", result="denied", detail="bad push token")
                 return self.send(401, json.dumps({"error": "bad push token"}), "application/json")
-            raw = self.read_body(MAX_PUSH)
+            raw = self.read_body(MAX_PUSH if path == "/api/push" else MAX_PART)
             if raw is None:
                 return self.send(413, json.dumps({"error": "push too large"}), "application/json")
             try:
-                result = accept_push(v.db, student_id, json.loads(raw))
+                payload = json.loads(raw) if raw else {}
+                if path == "/api/push":
+                    result = accept_push(v.db, student_id, payload)
+                elif path == "/api/push/begin":
+                    result = {"upload": push_begin(v.db, student_id)}
+                elif path == "/api/push/part":
+                    result = push_part(v.db, student_id, payload)
+                else:
+                    result = push_commit(v.db, student_id, payload)
             except (ValueError, ViewerError, AttributeError, TypeError) as e:
                 msg = str(e) if isinstance(e, ViewerError) else "push isn't valid JSON views"
                 audit(v.db, "device", "push", student_id, result="refused", detail=msg)
                 return self.send(422, json.dumps({"error": msg}), "application/json")
-            audit(v.db, "device", "push", student_id,
-                  detail=f"{result['views']} views, {result['notes']} notes")
+            if path in ("/api/push", "/api/push/commit"):
+                parts = f" in parts" if path.endswith("commit") else ""
+                audit(v.db, "device", "push", student_id,
+                      detail=f"{result['views']} views, {result['notes']} notes{parts}")
             return self.send(200, json.dumps({"ok": True, **result}), "application/json")
         raw = self.read_body(4096)
         form = urllib.parse.parse_qs((raw or b"").decode(errors="replace"))
@@ -1470,7 +1593,7 @@ def cmd_graduate(args):
         audit(db, cli_actor(), "graduate", detail=f"student #{student['id']}: views, logins, "
               f"records and {logged} access-log entries deleted")
         sid = student["id"]
-        for table in ("notes", "views", "push_tokens"):
+        for table in ("notes", "views", "push_tokens", "push_staging", "push_uploads"):
             db.execute(f"DELETE FROM {table} WHERE student_id = ?", (sid,))
         db.execute(f"DELETE FROM grants WHERE student_id = ? OR person_id IN ({marks})",
                    (sid, *gone))
