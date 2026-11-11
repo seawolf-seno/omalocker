@@ -82,6 +82,9 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
 - 2026-11-10: Omacanvas turn-in (Omawrite = Omacanvas turn-in, seno): `omalocker submission`
   (just the writing: no frontmatter/comments/blocks/link brackets) and `turned-in` (status +
   canvas_assignment). Omacanvas changes listed in docs/omacanvas.md, not made (other repo).
+- 2026-11-10: Canvas assignments -> Work/<class>/ notes: from plan.toml `canvas_assignment` +
+  connect.toml `canvas_url` + class.toml `canvas_course`, sent with levels; stubs never
+  overwrite the student's work (matched by link, then title). No Canvas token needed.
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
   `docs/plan.md` (backup key, where the viewer runs, parent sign-in, custody records);

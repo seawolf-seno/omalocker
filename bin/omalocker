@@ -354,6 +354,7 @@ def read_classes(classes_dir):
             "block": meta.get("block"),
             "room": meta.get("room") or None,
             "sample": bool(meta.get("sample")),
+            "canvas_course": str(meta.get("canvas_course") or "") or None,
             "ideas": [i for i in ideas.get("idea", []) if i.get("name")],
             "objectives": plan.get("objective", []),
         })
@@ -1671,6 +1672,35 @@ def locker_role(locker):
     return (me or {}).get("role")
 
 
+def canvas_url():
+    """The school's Canvas address, where OmaMastery keeps it (connect.toml)."""
+    if os.environ.get("OMALOCKER_CANVAS_URL"):
+        return os.environ["OMALOCKER_CANVAS_URL"].rstrip("/")
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or home() / ".config")
+    for path in (config_home / "omamastery" / "connect.toml", Path("/etc/omamastery/connect.toml")):
+        try:
+            url = str(load_toml(path).get("canvas_url") or "").rstrip("/")
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        if url.startswith("https://"):
+            return url
+    return None
+
+
+def class_assignments(c, base):
+    """The class's Canvas assignments, from plan.toml objectives that name one."""
+    out = []
+    for o in sorted(c["objectives"], key=lambda o: str(o.get("week", ""))):
+        aid = str(o.get("canvas_assignment") or "").strip()
+        if not aid:
+            continue
+        url = (f"{base}/courses/{c['canvas_course']}/assignments/{aid}"
+               if base and c.get("canvas_course") and aid.isdigit() else None)
+        out.append({"id": aid, "title": str(o.get("title") or aid), "week": str(o.get("week") or ""),
+                    "idea": note_name(o["idea"]) if o.get("idea") else None, "url": url})
+    return out
+
+
 def cmd_send_levels(args):
     quiet = 0 if args.if_set_up else 1
     locker = Path(args.locker or default_locker()).expanduser()
@@ -1691,6 +1721,7 @@ def cmd_send_levels(args):
         print(f"omalocker: no classes folder at {classes_dir}", file=sys.stderr)
         return quiet
     by_id = class_notes_by_id(locker / "Classes") if (locker / "Classes").is_dir() else {}
+    base = canvas_url()
     classes, no_id = [], 0
     for c in read_classes(classes_dir):
         if c["sample"]:
@@ -1709,7 +1740,8 @@ def cmd_send_levels(args):
                 continue
             students.append({**sid, **data})
         info = {"course": c["name"], "room": c["room"],
-                "block": None if c["block"] is None else str(c["block"]), "day": c["day"]}
+                "block": None if c["block"] is None else str(c["block"]), "day": c["day"],
+                "assignments": class_assignments(c, base)}
         classes.append({"class": by_id.get(c["id"]) or note_name(c["name"]),
                         "as_of": as_of or "", "info": info, "students": students})
     if not classes:
@@ -1765,6 +1797,52 @@ def class_note_from_teacher(locker, cls, c):
     return upsert(locker / "Classes" / f"{cls}.md", owned, block, cls, tail="\n## My notes\n")
 
 
+def work_stubs_from_teacher(locker, cls, c):
+    """A work note per Canvas assignment in Work/<class>/. Never overwrites the student's
+    work: an existing note (found by its Canvas link, then by title) only gets its
+    canvas_assignment and the app's block refreshed. Returns how many notes changed."""
+    folder = locker / "Work" / cls
+    assignments = (c.get("info") or {}).get("assignments") or []
+    by_link = {}
+    if folder.is_dir():
+        for path in folder.glob("*.md"):
+            try:
+                props, _ = read_note(path)
+            except (FormatError, UnicodeDecodeError):
+                continue
+            if (props or {}).get("canvas_assignment"):
+                by_link[str(props["canvas_assignment"])] = path
+    changed = 0
+    for a in assignments:
+        title = note_name(str(a.get("title") or a.get("id") or "Assignment"))
+        url = a.get("url")
+        path = by_link.get(url) if url else None
+        path = path or folder / f"{title}.md"
+        week = f", week of {a['week']}" if a.get("week") else ""
+        where = f": {url}" if url else ""
+        block = f"Canvas assignment{week}{where}"
+        if path.exists():
+            try:
+                props, body = read_note(path)
+            except (FormatError, UnicodeDecodeError):
+                continue
+            props = props or {}
+            if props.get("type") not in (None, "work"):
+                continue
+            if url:
+                props["canvas_assignment"] = url
+        else:
+            props = {"type": "work", "class": link(cls), "status": "idea"}
+            if a.get("idea") and (locker / "Ideas" / f"{a['idea']}.md").exists():
+                props["ideas"] = [link(a["idea"])]
+            props["canvas_assignment"] = url
+            body = f"# {title}\n"
+        body = set_block(body, "canvas", block)
+        if write_if_changed(path, dump_props(props) + body):
+            changed += 1
+    return changed
+
+
 def cmd_pull_levels(args):
     quiet = 0 if args.if_set_up else 1
     locker = Path(args.locker or default_locker()).expanduser()
@@ -1789,6 +1867,7 @@ def cmd_pull_levels(args):
         cls = note_name(str(c.get("class") or ""))
         if class_note_from_teacher(locker, cls, c) in ("created", "updated"):
             changed += 1
+        changed += work_stubs_from_teacher(locker, cls, c)
         path = locker / "Mastery" / f"{cls}.md"
         owned = {"type": "mastery", "class": link(cls), "source": SOURCE,
                  "as_of": c.get("as_of") or None}
@@ -1807,7 +1886,7 @@ def cmd_pull_levels(args):
         body = set_block(body, SOURCE, mastery_block(c, locker))
         if write_if_changed(path, dump_props(props) + body):
             changed += 1
-    print(f"Levels and class details for {len(got.get('classes', []))} classes; "
+    print(f"Levels, class details and assignments for {len(got.get('classes', []))} classes; "
           f"{changed} notes changed")
     return 0
 

@@ -124,7 +124,7 @@ mastery levels), with no AI, so it shows the teacher's judgment and nothing gues
 | **pacos** | install | `omalocker` package; `~/Locker` from `template/`; managed `.obsidian/` | VM: teacher and student (`beno29`) get a Locker; student can't turn on plugins |
 | **PacTerminus** | Terminus → Locker | completion marker (`~/.local/share/omaterminus/complete`, the finish time) → `Pathway/Milestones/<date> Finished PacTerminus.md` by `omalocker import pacterminus`, run by the hourly sync | Built 2026-11-10: marker → one milestone, on the parent's first page after the next push. Still: the VM run |
 | **Omawrite + Omacanvas turn-in** | both ways | Students write in `Work/<class>/`; Omacanvas turns in `omalocker submission`'s output (just the writing) and calls `omalocker turned-in` (`docs/omacanvas.md`) | Locker side built 2026-11-10. Still: three small Omacanvas changes, then a fictional account submits a Locker note |
-| **Canvas** | Canvas → Locker | OmaMastery setup's token: assignments → `Work/<class>/` stubs | Sandbox course |
+| **Canvas** | Canvas → Locker | Assignments OmaMastery setup already put in `plan.toml` travel with `send-levels`; `pull-levels` makes `Work/<class>/` notes (no token on any laptop) | Built 2026-11-10 with a fictional class, verified on staging. Still: a real or sandbox course end to end |
 | **Backup** | device → school | `omalocker backup` (restic, encrypted) every 2 days via a systemd timer; school IT holds the key (`docs/backup.md`) | Built and tested: back up, wipe, restore, identical, `doctor` clean. Still to do: the same in the pacos VM against school storage |
 
 `make test-connections` builds a fictional school in a temp `HOME` and runs every flow,

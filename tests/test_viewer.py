@@ -441,7 +441,8 @@ class Viewer(unittest.TestCase):
         """A fictional teacher's OmaMastery folder: one Biology class, three students."""
         bio = self.tmp / "teacher" / "Classes" / "bio"
         bio.mkdir(parents=True)
-        (bio / "class.toml").write_text('name = "Biology"\nday = "A"\nblock = 2\nroom = "S210"\n')
+        (bio / "class.toml").write_text('name = "Biology"\nday = "A"\nblock = 2\nroom = "S210"\n'
+                                        'canvas_course = "901"\n')
         (bio / "ideas.toml").write_text(
             '[[idea]]\nname = "Feedback loops in ecosystems"\njoint = "Systems and feedback"\n'
             '[[idea]]\nname = "Cellular respiration"\n')
@@ -449,9 +450,9 @@ class Viewer(unittest.TestCase):
             '[[objective]]\nid = "o1"\ntitle = "Trace energy in a food web"\n'
             'idea = "Feedback loops in ecosystems"\nweek = "1"\n'
             '[[objective]]\nid = "o2"\ntitle = "Model a predator-prey loop"\n'
-            'idea = "Feedback loops in ecosystems"\nweek = "2"\n'
+            'idea = "Feedback loops in ecosystems"\nweek = "2026-11-09"\ncanvas_assignment = "5501"\n'
             '[[objective]]\nid = "o3"\ntitle = "Measure yeast respiration"\n'
-            'idea = "Cellular respiration"\nweek = "3"\n')
+            'idea = "Cellular respiration"\nweek = "2026-11-16"\ncanvas_assignment = "5502"\n')
         (bio / "roster.toml").write_text(
             '[[student]]\nname = "Zz Fictional Rowan"\nblackbaud_id = "BB-ROWAN"\n'
             '[[student]]\nname = "Zz Fictional Other"\nblackbaud_id = "BB-OTHER"\n'
@@ -542,6 +543,47 @@ class Viewer(unittest.TestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM levels WHERE student_id = 1").fetchone()[0], 0)
         finally:
             db.close()
+
+    def test_canvas_assignments_become_work_notes(self):
+        os.environ["OMALOCKER_CANVAS_URL"] = "https://pacifica.instructure.com"
+        classes = self.teacher_classes()
+        teacher_token = self.admin("push-token", PEOPLE["biology"]).strip()
+        student_token = (self.tmp / "push-key").read_text().strip()
+        send = lambda: self.as_device(teacher_token, "--locker", str(self.tmp / "teacher" / "Locker"),
+                                      "send-levels", "--classes", str(classes))
+        pull = lambda: self.as_device(student_token, "--locker", str(self.locker), "pull-levels")
+        self.assertEqual(send()[0], 0)
+        self.assertEqual(pull()[0], 0)
+        stub = self.locker / "Work" / "Biology" / "Model a predator-prey loop.md"
+        props, body = om.read_note(stub)
+        url = "https://pacifica.instructure.com/courses/901/assignments/5501"
+        self.assertEqual(props, {"type": "work", "class": "[[Biology]]", "status": "idea",
+                                 "ideas": ["[[Feedback loops in ecosystems]]"], "canvas_assignment": url})
+        self.assertIn(f"Canvas assignment, week of 2026-11-09: {url}", body)
+        self.assertTrue((self.locker / "Work" / "Biology" / "Measure yeast respiration.md").exists())
+        # The student writes; the teacher renames the assignment. Same note, writing kept.
+        stub.write_text(stub.read_text().replace("status: idea", "status: draft")
+                        + "\nFoxes and rabbits, a loop I can graph.\n")
+        plan = classes / "bio" / "plan.toml"
+        plan.write_text(plan.read_text().replace("Model a predator-prey loop", "Predator-prey model"))
+        send(); pull()
+        self.assertFalse((self.locker / "Work" / "Biology" / "Predator-prey model.md").exists())
+        props, body = om.read_note(stub)
+        self.assertEqual(props["status"], "draft")
+        self.assertIn("a loop I can graph", body)
+        # What goes to Canvas is just the writing; the stub's link is what turned-in needs.
+        code, out, _ = self.as_device(student_token, "submission", str(stub))
+        self.assertNotIn("Canvas assignment", out)
+        self.assertIn("a loop I can graph", out)
+        code, _, err = self.as_device(student_token, "--locker", str(self.locker),
+                                      "turned-in", str(stub), "--assignment", url)
+        self.assertEqual(code, 0, err)
+        # The viewer refuses an assignment link that isn't Canvas.
+        bad = {"classes": [{"class": "Biology", "as_of": "", "students": [],
+                            "info": {"assignments": [{"title": "x", "url": "https://evil.example/x"}]}}]}
+        status, r = self.raw_push(bad, token=teacher_token, path="/api/levels")
+        self.assertEqual(status, 422)
+        self.assertIn("Canvas assignment", r["error"])
 
     def test_sign_out_ends_the_session(self):
         self.push()

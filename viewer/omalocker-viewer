@@ -677,6 +677,7 @@ def push_commit(db, student_id, payload):
 # laptop pulls its own (GET /api/levels) into Mastery/<class>.md.
 
 LEVEL_WORDS = ["Not yet", "Beginning", "Developing", "Proficient", "Extending"]
+CANVAS_ASSIGNMENT = re.compile(r"^https://[A-Za-z0-9.-]+/courses/\d+/assignments/\d+$")
 
 
 def short_text(value, limit, what):
@@ -718,6 +719,22 @@ def accept_levels(db, teacher, payload):
         # Where and when the class meets (OmaMastery's class.toml, shared with OmaClass).
         info = {k: short_text(raw_info.get(k), 100, f"class {k}")
                 for k in ("course", "room", "block", "day")}
+        # The class's Canvas assignments (plan.toml), for students' Work/<class>/ notes.
+        assignments = raw_info.get("assignments") or []
+        if not isinstance(assignments, list) or len(assignments) > 500:
+            raise ViewerError("assignments must be a list")
+        info["assignments"] = []
+        for a in assignments:
+            if not isinstance(a, dict):
+                raise ViewerError("an assignment must be an object")
+            url = short_text(a.get("url"), 300, "assignment link")
+            if url and not CANVAS_ASSIGNMENT.match(url):
+                raise ViewerError("an assignment link must be a Canvas assignment")
+            info["assignments"].append({
+                "id": short_text(a.get("id"), 64, "assignment id"),
+                "title": short_text(a.get("title"), 300, "assignment title"),
+                "week": short_text(a.get("week"), 40, "assignment week"),
+                "idea": short_text(a.get("idea"), 300, "assignment idea"), "url": url})
         students = c.get("students")
         if not isinstance(students, list) or len(students) > 500:
             raise ViewerError("a class needs a list of students")

@@ -114,6 +114,22 @@ email>` for the teacher's laptop (only someone with a teacher grant gets one). T
 sync service runs `pull-levels`, `push` and `send-levels`; each does nothing where it doesn't
 apply.
 
+### Canvas assignments
+
+With each class, `send-levels` also sends its Canvas assignments: the `plan.toml` objectives
+that name a `canvas_assignment`, with a link built from OmaMastery's `canvas_url`
+(`connect.toml`) and the class's `canvas_course`. No Canvas token is used or needed on any
+laptop. `pull-levels` makes a work note per assignment in the student's `Work/<class>/`
+(`status: idea`, `canvas_assignment` set, the core idea linked if the Locker has it). It never
+overwrites the student's work: a note it finds by its Canvas link (or, the first time, by
+title) only gets the link and its `omalocker:canvas` block refreshed; status and writing stay
+the student's. `omalocker submission` leaves that block out, and the link is what
+`omalocker turned-in` records.
+
+A note the student made before the assignment existed isn't matched unless it has the same
+title or its `canvas_assignment` is set to the assignment's link; otherwise the student gets
+a second note for the same work.
+
 ## Signing in by email
 
 The sign-in page asks for an email address and mails a one-time link (15 minutes). The page
