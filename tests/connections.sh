@@ -114,4 +114,21 @@ if curl -s -b "$HOME/parent1@example.org.jar" "$base/s/1/parent/?all=1" | grep -
 fi
 echo "role checks pass: custodial parent, non-custodial parent, teacher"
 
+step "Graduation: hand over the Locker, stop the device, delete from the viewer"
+"$omalocker" --locker "$student" graduate --to "$HOME/usb"
+unzip -tq "$HOME/usb/"*.zip
+unzip -l "$HOME/usb/"*.zip | grep -q "Locker/Inbox/ask about summer labs.md"   # private notes are theirs too
+if "$omalocker" --locker "$student" push 2>/dev/null; then
+  echo "a graduated Locker still pushed" >&2; exit 1
+fi
+"$viewer" graduate rowan@student.example.org | grep -q "Nothing deleted"
+[ "$(code parent1@example.org /s/1/parent/)" = 200 ]
+"$viewer" graduate rowan@student.example.org --yes
+[ "$(code parent1@example.org /s/1/parent/)" = 303 ]   # login gone with the student
+[ "$(code okafor@example.org /s/1/teacher/Biology/)" = 404 ]
+"$viewer" list | grep -q okafor@example.org             # staff stay
+if "$viewer" list | grep -q -e rowan@ -e parent1@; then
+  echo "graduated student or family still in the viewer" >&2; exit 1
+fi
+
 printf '\nAll connections pass.\n'

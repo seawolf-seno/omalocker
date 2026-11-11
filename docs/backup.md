@@ -48,5 +48,6 @@ reach). Recommended: one per person.
 
 ## Not yet
 
-- Graduation (`omalocker graduate`): delete the student's repository from school storage.
+- Graduation: after `omalocker graduate`, the device makes no more backups; IT deletes the
+  student's repository from school storage (`docs/graduation.md`).
 - pacos: install `restic`, the settings file, the key, and enable the timer for every user.

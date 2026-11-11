@@ -10,6 +10,7 @@ Python stdlib only. See docs/format.md for the note format.
   omalocker restore [--to DIR] [--snapshot ID]
   omalocker views [--out DIR]
   omalocker push
+  omalocker graduate --to DIR
   omalocker doctor [--show-names] [--json]
 
 Never opens roster.toml or notes.md in a class folder. Only `mastery` reads
@@ -1052,6 +1053,11 @@ def cmd_backup(args):
               "/etc/omalocker/backup.toml (see docs/backup.md).", file=sys.stderr)
         return 1
     locker = Path(args.locker or cfg.get("locker") or default_locker()).expanduser().resolve()
+    done = graduated()
+    if done and not args.status:
+        print(f"This Locker graduated on {done['graduated'][:10]}: no more backups. "
+              "School IT deletes the old ones (docs/graduation.md).")
+        return 0 if args.if_due else 1
     state = read_state()
     age = backup_age(state)
 
@@ -1148,6 +1154,8 @@ def cmd_restore(args):
 
 def backup_problem(locker):
     """A line for doctor when this Locker's backup is missing or late, else None."""
+    if graduated():
+        return None
     try:
         cfg = load_backup_config()
     except BackupError as e:
@@ -1444,6 +1452,11 @@ def cmd_push(args):
     if not locker.is_dir():
         print(f"omalocker: no Locker at {locker}", file=sys.stderr)
         return 1
+    done = graduated()
+    if done:
+        print(f"omalocker: this Locker graduated on {done['graduated'][:10]}; "
+              "views aren't sent any more", file=sys.stderr)
+        return 1
     try:
         cfg = viewer_config()
         if cfg is None:
@@ -1460,6 +1473,104 @@ def cmd_push(args):
     if skipped:
         print(f"  {skipped} note{'s' if skipped > 1 else ''} left out: frontmatter can't be read "
               "(run `omalocker doctor`)")
+    return 0
+
+
+# ---------------------------------------------------------------- graduate
+#
+# At graduation the student keeps their Locker and the school deletes its
+# copies (decision 6): hand over the Locker first, then this device stops
+# pushing and backing up, then the viewer and backups are deleted
+# (docs/graduation.md).
+
+def graduated_path():
+    state_home = Path(os.environ.get("XDG_STATE_HOME") or home() / ".local" / "state")
+    return state_home / "omalocker" / "graduated.json"
+
+
+def graduated():
+    try:
+        return json.loads(graduated_path().read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def export_excluded(rel):
+    import fnmatch
+    posix = rel.as_posix()
+    return any(fnmatch.fnmatch(posix, pat) or fnmatch.fnmatch(rel.name, pat)
+               or posix.startswith(pat + "/") for pat in BACKUP_EXCLUDES)
+
+
+def export_locker(locker, zip_path):
+    """Zip the whole Locker into zip_path and read it back. Returns the file count."""
+    import zipfile
+    files = []
+    for root, dirs, names in os.walk(locker):
+        dirs.sort()
+        for name in sorted(names):
+            path = Path(root, name)
+            rel = path.relative_to(locker)
+            if path.is_symlink() or export_excluded(rel):
+                continue
+            files.append(rel)
+    tmp = zip_path.with_name(f".{zip_path.name}.omalocker-tmp")
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+            for rel in files:
+                z.write(locker / rel, (Path("Locker") / rel).as_posix())
+        with zipfile.ZipFile(tmp) as z:
+            if z.testzip() is not None or len(z.namelist()) != len(files):
+                raise OSError("the export didn't read back complete")
+        os.replace(tmp, zip_path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return len(files)
+
+
+def cmd_graduate(args):
+    locker = Path(args.locker or default_locker()).expanduser().resolve()
+    if not (locker / "Me.md").exists():
+        print(f"omalocker: no Locker at {locker}", file=sys.stderr)
+        return 1
+    try:
+        me, _ = read_note(locker / "Me.md")
+    except FormatError as e:
+        print(f"omalocker: Me.md: {e}", file=sys.stderr)
+        return 1
+    if (me or {}).get("role") != "student":
+        print("omalocker: graduate is for a student's Locker (Me.md role: student)",
+              file=sys.stderr)
+        return 1
+    out = Path(args.to).expanduser().resolve()
+    if out == locker or locker in out.parents:
+        print("omalocker: put the export outside the Locker", file=sys.stderr)
+        return 1
+    out.mkdir(parents=True, exist_ok=True)
+    zip_path = out / f"Locker {now().astimezone().date().isoformat()}.zip"
+    if zip_path.exists():
+        print(f"omalocker: {zip_path} already exists; nothing written over it", file=sys.stderr)
+        return 1
+    try:
+        count = export_locker(locker, zip_path)
+    except OSError as e:
+        print(f"omalocker: export failed, nothing changed: {e}", file=sys.stderr)
+        return 1
+
+    first = graduated()
+    path = graduated_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "graduated": (first or {}).get("graduated") or now().isoformat(timespec="seconds"),
+        "locker": str(locker), "export": str(zip_path), "files": count}, indent=2) + "\n")
+    if views_dir().exists():
+        shutil.rmtree(views_dir())  # local copies of the views; the Locker stays
+    print(f"Exported the Locker ({count} files) to {zip_path}")
+    print("  This device no longer pushes views or makes backups.")
+    print("  Next (docs/graduation.md):")
+    print("    1. Give the student the zip and check they can open it.")
+    print("    2. Viewer admin: omalocker-viewer graduate <student email> --yes")
+    print("    3. School IT: delete this student's backup repository on school storage.")
     return 0
 
 
@@ -1633,6 +1744,9 @@ def cmd_doctor(args):
         print(f"  backup: {backup}")
     if leak or stale:
         print(f"  views: {leak or stale}")
+    done = graduated()
+    if done:
+        print(f"  graduated on {done['graduated'][:10]}; exported to {done.get('export')}")
     if not report:
         print("  all good: every note has a type, valid frontmatter, and links that resolve")
         return 1 if failed else 0
@@ -1693,6 +1807,10 @@ def main(argv=None):
 
     p = sub.add_parser("push", help="build the views and send them to the viewer")
     p.set_defaults(func=cmd_push)
+
+    p = sub.add_parser("graduate", help="hand the student their Locker; stop pushing and backups")
+    p.add_argument("--to", required=True, help="folder for the Locker zip (e.g. a USB drive)")
+    p.set_defaults(func=cmd_graduate)
 
     p = sub.add_parser("doctor", help="check frontmatter, types, blocks and links")
     p.add_argument("--show-names", action="store_true",

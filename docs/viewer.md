@@ -21,8 +21,9 @@ Still open (see `docs/plan.md`, decisions still open 3–5):
   over. Next: email the link to parents; school accounts (SSO) for staff.
 - **Where family and custody records come from.** Today they're entered with `grant`. Next:
   import from the school's records, and decide who updates custody changes.
-- Not built yet: graduation (delete a student's views, records and logins), the teacher →
-  student levels flow, attachments, an audit log of who opened what, rate limits.
+- Graduation: `omalocker-viewer graduate <email>` (list) / `--yes` (delete); see
+  `docs/graduation.md`.
+- Not built yet: the teacher → student levels flow, attachments, an audit log of who opened what, rate limits.
 
 ## Who sees what
 

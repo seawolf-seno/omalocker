@@ -126,7 +126,8 @@ class Viewer(unittest.TestCase):
             with opener.open(self.base + path) as r:
                 return r.status, r.read().decode()
         except urllib.error.HTTPError as e:
-            return e.code, e.read().decode()
+            with e:
+                return e.code, e.read().decode()
 
     def post(self, opener, path, form, expect=None):
         data = urllib.parse.urlencode(form).encode()
@@ -134,7 +135,8 @@ class Viewer(unittest.TestCase):
             with opener.open(self.base + path, data=data) as r:
                 status = r.status
         except urllib.error.HTTPError as e:
-            status = e.code
+            with e:
+                status = e.code
         if expect:
             self.assertEqual(status, expect)
         return status
@@ -147,7 +149,8 @@ class Viewer(unittest.TestCase):
             with urllib.request.urlopen(req) as r:
                 return r.status, json.loads(r.read())
         except urllib.error.HTTPError as e:
-            return e.code, json.loads(e.read())
+            with e:
+                return e.code, json.loads(e.read())
 
     def url(self, audience, scope="", note=None):
         u = vw.view_url(self.student_id, audience, scope)
@@ -304,6 +307,49 @@ class Viewer(unittest.TestCase):
         code, _, err = self.push()
         self.assertEqual(code, 1)
         self.assertIn("https://", err)
+
+    def test_graduate_lists_then_deletes(self):
+        self.push()
+        # A sibling still in school keeps parent_two's login; okafor teaches both.
+        self.admin("person", "add", "--name", "Sibling", "--email", "sib@student.example.org",
+                   "--student", "--grad-year", "2031")
+        self.admin("grant", "parent", "--person", PEOPLE["other_parent"],
+                   "--student", "sib@student.example.org", "--primary-custody")
+        parent = self.browser("parent")
+        self.assertEqual(self.get(parent, self.url("parent"))[0], 200)
+
+        out = self.admin("graduate", STUDENT)
+        self.assertIn("Nothing deleted", out)
+        self.assertIn(PEOPLE["parent"], out)
+        self.assertNotIn(PEOPLE["other_parent"], out)
+        self.assertEqual(self.get(parent, self.url("parent"))[0], 200)
+
+        out = self.admin("graduate", STUDENT, "--yes")
+        self.assertIn("Deleted.", out)
+        db = vw.connect(self.data)
+        try:
+            emails = {r["email"] for r in db.execute("SELECT email FROM people")}
+            for table in ("views", "notes", "grants", "push_tokens"):
+                n = db.execute(f"SELECT COUNT(*) FROM {table} WHERE student_id = 1").fetchone()[0]
+                self.assertEqual(n, 0, table)
+        finally:
+            db.close()
+        self.assertNotIn(STUDENT, emails)
+        self.assertNotIn(PEOPLE["parent"], emails)          # only had this student
+        self.assertIn(PEOPLE["other_parent"], emails)       # has the sibling
+        self.assertIn(PEOPLE["biology"], emails)            # staff stay
+        self.assertEqual(self.get(parent, self.url("parent"))[0], 303)  # session gone
+        code, _, err = self.push()                          # old push token is dead
+        self.assertEqual(code, 1)
+        self.assertIn("401", err)
+        raw = (self.data / "viewer.db").read_bytes()
+        self.assertNotIn(b"Rowan Teague", raw)
+        self.assertNotIn(b"yeast respiration", raw)
+
+    def test_graduate_only_students(self):
+        code, err = self.admin("graduate", PEOPLE["parent"], "--yes", ok=False)
+        self.assertEqual(code, 1)
+        self.assertIn("isn't a student", err)
 
     def test_security_headers(self):
         status, _ = self.get(self.browser(), "/")

@@ -143,8 +143,9 @@ views on the device, push to staging, fictional parent, teacher and advisor logi
 **3. Student Locker in the pacos VM.** Package, managed Obsidian, Terminus milestone,
 Omawrite, encrypted backup and restore.
 **4. Pilot.** One class, after leadership signs off on the decisions below.
-**At graduation.** `omalocker graduate`: hand the student their Locker, then delete their
-views, login and family records from the viewer, and their backups from school storage.
+**At graduation.** Built 2026-11-10 (`docs/graduation.md`): `omalocker graduate` zips the
+Locker for the student and stops the device pushing and backing up; `omalocker-viewer
+graduate` deletes their views, login and family records; IT deletes their backup repository.
 
 ## Decisions made (seno, 2026-11-10)
 

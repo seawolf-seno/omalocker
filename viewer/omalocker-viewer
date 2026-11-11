@@ -13,6 +13,7 @@ the student before showing anything. See docs/viewer.md.
   omalocker-viewer revoke parent|teacher|advisor|activity --person EMAIL --student EMAIL [--scope X]
   omalocker-viewer sign-in-link EMAIL
   omalocker-viewer push-token STUDENT_EMAIL
+  omalocker-viewer graduate STUDENT_EMAIL [--yes]
   omalocker-viewer list
   omalocker-viewer serve [--host 127.0.0.1] [--port 8380]
 """
@@ -136,6 +137,7 @@ def connect(data):
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
     db.execute("PRAGMA journal_mode = WAL")
+    db.execute("PRAGMA secure_delete = ON")  # deleted student data is overwritten
     db.executescript(SCHEMA)
     return db
 
@@ -890,6 +892,56 @@ def cmd_push_token(args):
     return 0
 
 
+def graduation_plan(db, student):
+    """What graduating this student deletes: counts, and family logins that go with it."""
+    sid = student["id"]
+    count = lambda sql: db.execute(sql, (sid,)).fetchone()[0]
+    family = db.execute(
+        """SELECT p.* FROM people p WHERE p.is_student = 0 AND p.is_admin = 0
+           AND EXISTS (SELECT 1 FROM grants g WHERE g.person_id = p.id
+                       AND g.student_id = ? AND g.audience = 'parent')
+           AND NOT EXISTS (SELECT 1 FROM grants g WHERE g.person_id = p.id
+                           AND g.student_id != ?)""", (sid, sid)).fetchall()
+    return {
+        "views": count("SELECT COUNT(*) FROM views WHERE student_id = ?"),
+        "notes": count("SELECT COUNT(*) FROM notes WHERE student_id = ?"),
+        "grants": count("SELECT COUNT(*) FROM grants WHERE student_id = ?"),
+        "push_token": count("SELECT COUNT(*) FROM push_tokens WHERE student_id = ?"),
+        "family": family,
+    }
+
+
+def cmd_graduate(args):
+    cfg, db = open_admin(args)
+    student = person_by_email(db, args.email)
+    if not student["is_student"]:
+        raise ViewerError(f"{args.email} isn't a student")
+    plan = graduation_plan(db, student)
+    print(f"Graduating {student['name']} <{student['email']}> deletes:")
+    print(f"  {plan['views']} views ({plan['notes']} notes), {plan['grants']} grants, "
+          f"{'the' if plan['push_token'] else 'no'} push token, and their login")
+    for f in plan["family"]:
+        print(f"  family login {f['name']} <{f['email']}> (no other student here)")
+    print("  Teachers, advisors, leaders and family with another student here stay.")
+    if not args.yes:
+        print("Nothing deleted. Run again with --yes once the student has their Locker.")
+        return 0
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        for f in plan["family"]:
+            db.execute("DELETE FROM people WHERE id = ?", (f["id"],))
+        # Cascades: grants, views, notes, push token, sign-in links, sessions.
+        db.execute("DELETE FROM people WHERE id = ?", (student["id"],))
+        db.execute("COMMIT")
+    except BaseException:
+        db.execute("ROLLBACK")
+        raise
+    db.execute("VACUUM")  # deleted rows shouldn't linger in the file
+    db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    print("Deleted.")
+    return 0
+
+
 def cmd_list(args):
     cfg, db = open_admin(args)
     print(f"{cfg['env']} viewer at {cfg['base_url']}")
@@ -957,6 +1009,11 @@ def main(argv=None):
     p = sub.add_parser("push-token", help="make a student device's push token")
     p.add_argument("email")
     p.set_defaults(func=cmd_push_token)
+
+    p = sub.add_parser("graduate", help="delete a graduated student's views, login and records")
+    p.add_argument("email")
+    p.add_argument("--yes", action="store_true", help="delete (without it: only list)")
+    p.set_defaults(func=cmd_graduate)
 
     p = sub.add_parser("list", help="people and grants")
     p.set_defaults(func=cmd_list)

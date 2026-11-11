@@ -22,6 +22,7 @@ from Formation Pathways.
 | `omalocker restore [--to DIR]` | Restores the newest backup into a missing or empty `~/Locker`, or a new folder. Never writes over notes |
 | `omalocker views [--out DIR]` | On a student's Locker: builds each audience's view (parent, advisor, each teacher, each activity leader) in `~/.local/state/omalocker/views/`, filtered by `type`, linked classes/activities and `share`. Private notes, `AGENTS.md` and notes about classmates are never in a view. See `docs/plan.md` |
 | `omalocker push` | Builds the views and sends them to the viewer set in `/etc/omalocker/viewer.toml` (https only) |
+| `omalocker graduate --to DIR` | Zips the student's whole Locker for them, then stops this device pushing views and making backups. Then the viewer and IT delete the school's copies: `docs/graduation.md` |
 | `omalocker doctor` | Checks every note: frontmatter, `type`, `share`, where it lives, blocks, links; and that the backup isn't missing or late. Hides `People/` notes and link targets unless `--show-names` |
 
 ## Viewer (`viewer/omalocker-viewer`)
@@ -34,4 +35,4 @@ Staging only for now. See `docs/viewer.md`.
 `make test` runs the unit tests (backup tests need `restic`, or `OMALOCKER_RESTIC=/path/to/restic`); `make test-connections` builds a fictional school in a temp
 `HOME` and runs every connection built so far.
 
-Status: Phase 1 commands built (init, import classes, mastery, doctor), encrypted backup/restore, per-audience views on the device, and a first viewer (staging, fictional people). Next: emailed sign-in links, family records from the school's records, graduation; or packaging in pacos.
+Status: Phase 1 commands built (init, import classes, mastery, doctor), encrypted backup/restore, per-audience views on the device, and a first viewer (staging, fictional people), and graduation. Next: audit log, emailed sign-in links, family records from the school's records; or packaging in pacos.

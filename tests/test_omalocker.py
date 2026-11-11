@@ -575,6 +575,52 @@ class Views(Env):
         self.assertEqual(code, 1)
         self.assertIn("views hold 1 note their audience can't see", out)
 
+    def test_graduate_exports_then_stops_push_and_backup(self):
+        import zipfile
+        self.build()
+        (self.locker / ".obsidian").mkdir(exist_ok=True)
+        (self.locker / ".obsidian" / "workspace.json").write_text("{}")
+        (self.locker / ".obsidian" / "app.json").write_text("{}")
+        usb = self.tmp / "usb"
+        code, out, err = self.run_cli("graduate", "--to", str(usb))
+        self.assertEqual(code, 0, err)
+        zip_path = usb / f"Locker {om.now().astimezone().date().isoformat()}.zip"
+        with zipfile.ZipFile(zip_path) as z:
+            names = set(z.namelist())
+            self.assertEqual(z.read("Locker/Me.md").decode(), self.note("Me.md"))
+        self.assertIn("Locker/Inbox/ask about summer labs.md", names)  # private: still theirs
+        self.assertIn("Locker/.obsidian/app.json", names)
+        self.assertNotIn("Locker/.obsidian/workspace.json", names)
+        self.assertEqual(len(names), sum(1 for p in self.locker.rglob("*") if p.is_file()) - 1)
+        self.assertFalse(self.out.exists())          # local view copies gone
+        self.assertTrue((self.locker / "Me.md").exists())  # the Locker stays
+
+        code, _, err = self.run_cli("push")
+        self.assertEqual(code, 1)
+        self.assertIn("graduated", err)
+        (self.tmp / "backup.toml").write_text('repository = "/x"\npassword_file = "/y"\n')
+        code, out, _ = self.run_cli("backup", "--if-due")
+        self.assertEqual(code, 0)
+        self.assertIn("no more backups", out)
+        self.assertEqual(self.run_cli("backup")[0], 1)
+        code, out, _ = self.run_cli("doctor")
+        self.assertIn("graduated on 2026-11-10", out)
+        self.assertNotIn("never backed up", out)
+
+        code, _, err = self.run_cli("graduate", "--to", str(usb))
+        self.assertEqual(code, 1)
+        self.assertIn("already exists", err)
+
+    def test_graduate_only_students_and_outside_the_locker(self):
+        code, _, err = self.run_cli("graduate", "--to", str(self.locker / "out"))
+        self.assertEqual(code, 1)
+        self.assertIn("outside the Locker", err)
+        self.edit("Me.md", "role: student", "role: teacher")
+        code, _, err = self.run_cli("graduate", "--to", str(self.tmp / "usb"))
+        self.assertEqual(code, 1)
+        self.assertIn("for a student's Locker", err)
+        self.assertFalse(om.graduated_path().exists())
+
     def test_views_go_outside_the_locker(self):
         code, _, err = self.run_cli("views", "--out", str(self.locker / "views"))
         self.assertEqual(code, 1)
