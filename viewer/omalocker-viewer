@@ -712,6 +712,12 @@ def accept_levels(db, teacher, payload):
         if not name or "/" in name or name.startswith("."):
             raise ViewerError("bad class name")
         as_of = short_text(c.get("as_of"), 40, "as_of") or ""
+        raw_info = c.get("info") or {}
+        if not isinstance(raw_info, dict):
+            raise ViewerError("class info must be an object")
+        # Where and when the class meets (OmaMastery's class.toml, shared with OmaClass).
+        info = {k: short_text(raw_info.get(k), 100, f"class {k}")
+                for k in ("course", "room", "block", "day")}
         students = c.get("students")
         if not isinstance(students, list) or len(students) > 500:
             raise ViewerError("a class needs a list of students")
@@ -720,7 +726,8 @@ def accept_levels(db, teacher, payload):
             if not isinstance(s, dict):
                 raise ViewerError("a student must be an object")
             ids = {k: short_text(s.get(k), 64, k) for k in ("blackbaud_id", "canvas_id")}
-            data = {"ideas": check_level_rows(s.get("ideas"), ("name", "joint"), "core idea"),
+            data = {"info": info,
+                    "ideas": check_level_rows(s.get("ideas"), ("name", "joint"), "core idea"),
                     "objectives": check_level_rows(s.get("objectives"),
                                                    ("id", "title", "idea", "week"), "objective")}
             rows.append((ids, data))

@@ -102,6 +102,12 @@ A teacher's levels reach each student's Locker through the viewer:
 4. The next push carries them into the views: the parent overview shows core-idea levels,
    the class's teacher view the whole note.
 
+Each class also carries where and when it meets (course name, room, block, day from
+OmaMastery's `class.toml`, the same room OmaClass uses). `pull-levels` keeps the student's
+`Classes/<class>.md` up to date with them (and links the teacher if the Locker has their
+People note), changing only those properties and the import's block. On a teacher's
+laptop, `omalocker import classes` already copies them from `class.toml`.
+
 Setup: `omalocker-viewer person add ... --student --blackbaud-id <id>` (or
 `person ids <email> --blackbaud-id <id>` later), and `omalocker-viewer push-token <teacher
 email>` for the teacher's laptop (only someone with a teacher grant gets one). The hourly

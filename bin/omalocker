@@ -1648,8 +1648,10 @@ def cmd_send_levels(args):
                 no_id += 1
                 continue
             students.append({**sid, **data})
+        info = {"course": c["name"], "room": c["room"],
+                "block": None if c["block"] is None else str(c["block"]), "day": c["day"]}
         classes.append({"class": by_id.get(c["id"]) or note_name(c["name"]),
-                        "as_of": as_of or "", "students": students})
+                        "as_of": as_of or "", "info": info, "students": students})
     if not classes:
         print("omalocker: no classes with levels to send")
         return 0
@@ -1684,6 +1686,25 @@ def mastery_block(c, locker):
     return "\n".join(lines)
 
 
+def class_note_from_teacher(locker, cls, c):
+    """The student's Classes/<class>.md: room, block and day as the teacher's OmaMastery
+    (and OmaClass) have them. Only these properties and the import's block are rewritten."""
+    info = c.get("info") or {}
+    owned = {"type": "class", "course": info.get("course") or cls, "room": info.get("room"),
+             "source": SOURCE}
+    if info.get("block") not in (None, ""):
+        owned["block"] = int(info["block"]) if str(info["block"]).isdigit() else info["block"]
+    if info.get("day"):
+        owned["day"] = info["day"]
+    teacher = note_name(c.get("teacher") or "")
+    if teacher and (locker / "People" / f"{teacher}.md").exists():
+        owned["teacher"] = link(teacher)
+    ideas = [note_name(i["name"]) for i in c.get("ideas", []) if i.get("name")]
+    shown = [link(i) if (locker / "Ideas" / f"{i}.md").exists() else i for i in ideas]
+    block = "Core ideas: " + (", ".join(shown) + "." if shown else "none yet.")
+    return upsert(locker / "Classes" / f"{cls}.md", owned, block, cls, tail="\n## My notes\n")
+
+
 def cmd_pull_levels(args):
     quiet = 0 if args.if_set_up else 1
     locker = Path(args.locker or default_locker()).expanduser()
@@ -1706,6 +1727,8 @@ def cmd_pull_levels(args):
     changed = 0
     for c in got.get("classes", []):
         cls = note_name(str(c.get("class") or ""))
+        if class_note_from_teacher(locker, cls, c) in ("created", "updated"):
+            changed += 1
         path = locker / "Mastery" / f"{cls}.md"
         owned = {"type": "mastery", "class": link(cls), "source": SOURCE,
                  "as_of": c.get("as_of") or None}
@@ -1724,7 +1747,8 @@ def cmd_pull_levels(args):
         body = set_block(body, SOURCE, mastery_block(c, locker))
         if write_if_changed(path, dump_props(props) + body):
             changed += 1
-    print(f"Levels for {len(got.get('classes', []))} classes; {changed} notes changed")
+    print(f"Levels and class details for {len(got.get('classes', []))} classes; "
+          f"{changed} notes changed")
     return 0
 
 

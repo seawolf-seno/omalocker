@@ -71,6 +71,8 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
   ids in code, sends by Blackbaud/Canvas id, never names) -> viewer (`levels` table, only
   granted students) -> `pull-levels` (student; Mastery/<class>.md block). Hourly sync service
   runs pull-levels, push, send-levels. Agents still never open roster.toml/mastery.csv.
+- 2026-11-10: OmaClass room: class.toml `room` (what OmaClass reads) -> teacher's class note
+  (import) and student's class note (sent with levels; pull-levels updates room/block/day).
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
   `docs/plan.md` (backup key, where the viewer runs, parent sign-in, custody records);

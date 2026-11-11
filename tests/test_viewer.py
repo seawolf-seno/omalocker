@@ -441,7 +441,7 @@ class Viewer(unittest.TestCase):
         """A fictional teacher's OmaMastery folder: one Biology class, three students."""
         bio = self.tmp / "teacher" / "Classes" / "bio"
         bio.mkdir(parents=True)
-        (bio / "class.toml").write_text('name = "Biology"\n')
+        (bio / "class.toml").write_text('name = "Biology"\nday = "A"\nblock = 2\nroom = "S210"\n')
         (bio / "ideas.toml").write_text(
             '[[idea]]\nname = "Feedback loops in ecosystems"\njoint = "Systems and feedback"\n'
             '[[idea]]\nname = "Cellular respiration"\n')
@@ -517,6 +517,12 @@ class Viewer(unittest.TestCase):
         self.assertIn("| [[Cellular respiration]] | Extending |", note)
         self.assertIn("| Model a predator-prey loop | [[Feedback loops in ecosystems]] | Developing |", note)
         self.assertIn("Copied from [[Mr. Okafor]]", note)   # the student's own text stays
+        # The class note follows the teacher's room (OmaMastery/OmaClass): S104 -> S210.
+        cls = (self.locker / "Classes" / "Biology.md").read_text()
+        props, _ = om.read_note(self.locker / "Classes" / "Biology.md")
+        self.assertEqual((props["room"], props["block"], props["day"]), ("S210", "2", "A"))
+        self.assertEqual(props["teacher"], "[[Mr. Okafor]]")
+        self.assertIn("energy in, energy out", cls)          # the student's notes stay
         self.assertEqual(self.as_device(student_token, "--locker", str(self.locker),
                                         "pull-levels")[1].split("; ")[1].strip(), "0 notes changed")
         self.push()

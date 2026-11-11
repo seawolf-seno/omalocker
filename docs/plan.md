@@ -120,7 +120,7 @@ mastery levels), with no AI, so it shows the teacher's judgment and nothing gues
 | **OmaLocker viewer** | Device → viewer (views only) | `omalocker push` sends the views; the viewer checks each person's role and, for parents, primary custody (`docs/viewer.md`) | Built and tested on a local staging viewer: fictional custodial and non-custodial parent, teacher, advisor, activity leader and admin each see the right view, or none. Still to do: a real staging host |
 | **Formation Pathways** | none | No connection, either way | Confirm OmaLocker sends nothing to FP and reads nothing from it |
 | **Grades → system of record** | unchanged | Existing path, not touched | Confirm OmaLocker sends no grades anywhere new |
-| **OmaClass** (Veyon) | Classes → Locker | `room` → class note property | Room shows on class note |
+| **OmaClass** (Veyon) | Classes → Locker | `room` (OmaMastery's `class.toml`, which OmaClass reads) → class note property: teacher's Locker by `import classes`, students' through `send-levels`/`pull-levels` | Built 2026-11-10: a room change reaches the teacher's and the student's class note and the parent overview |
 | **pacos** | install | `omalocker` package; `~/Locker` from `template/`; managed `.obsidian/` | VM: teacher and student (`beno29`) get a Locker; student can't turn on plugins |
 | **PacTerminus** | Terminus → Locker | completion marker → a note in `Pathway/Milestones/` | VM: finish quest → milestone, visible in parent view |
 | **Omawrite + Omacanvas turn-in** | both ways | Omawrite saves to `Work/<class>/`; turn-in submits from there | Fictional account submits a Locker file |

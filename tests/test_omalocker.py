@@ -148,6 +148,22 @@ class ImportClasses(Env):
         super().setUp()
         self.run_cli("init", "--role", "teacher")
 
+    def test_room_from_omaclass_shows_on_the_class_note(self):
+        # class.toml's room is the Veyon room OmaClass uses; import copies it.
+        self.run_cli("import", "classes")
+        props, _ = om.read_note(self.locker / "Classes" / "Biology.md")
+        self.assertEqual((props["room"], props["block"], props["day"]), ("S104", "2", "A"))
+        toml = self.classes / "biology" / "class.toml"
+        toml.write_text(toml.read_text().replace('room = "S104"', 'room = "S210"'))
+        self.run_cli("import", "classes")
+        props, _ = om.read_note(self.locker / "Classes" / "Biology.md")
+        self.assertEqual(props["room"], "S210")
+        # Geometry has no room yet: the property is there, empty.
+        geometry = [om.read_note(n)[0] for n in (self.locker / "Classes").glob("*.md")
+                    if om.read_note(n)[0].get("omamastery") == "geometry"]
+        self.assertEqual(len(geometry), 1)
+        self.assertIn(geometry[0].get("room"), (None, ""))
+
     def test_never_opens_private_files(self):
         private = [self.classes / "geometry" / n for n in ("roster.toml", "mastery.csv", "notes.md")]
         for p in private:
