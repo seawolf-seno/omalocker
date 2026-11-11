@@ -84,7 +84,8 @@ device-to-device sync (parents don't have school devices).
 Obsidian on the device: offline, plain Markdown, graph, backlinks and Bases with no
 community plugins, mature on Linux (installed here, 1.14.4). It's closed source, but
 because the files are plain Markdown, it's easy to replace. Its terms require users to be
-adults, so students need Obsidian's written permission first (see open decisions). Others considered:
+adults; Obsidian says parent consent, or an opt-out in the school's usual handouts, meets
+that (open decision 1). Others considered:
 
 - **Logseq**: open source, but built around an outliner; check whether its newer
   database version still keeps plain files before relying on it.
@@ -196,10 +197,25 @@ emails, who signs data agreements (Resend, Vercel, Turso), backup storage, and d
      The app only goes online for update checks, plugin and theme browsing, and embedded
      web pages; pacos turns these off for students.
    - **Asked (seno, 2026-11-10):** emailed Obsidian for written permission for students
-     under 18 using the desktop app with no account, installed by the school. Waiting for
-     the reply; keep it on file.
-     Teachers and staff can use it now. If Obsidian says no, students get an open-source
-     editor (SilverBullet or Logseq) instead; the Locker files don't change.
+     under 18 using the desktop app with no account, installed by the school.
+   - **Answer (Obsidian Support, 2026-11-10, to seno and Samuel):** the age line is standard
+     terms language (a minor can't enter a contract) and won't change for one school.
+     **Parent permission meets it.** The school can also use an **opt-out**: say in the
+     normal handouts that Obsidian is one of the class's tools and let parents opt out.
+     Students who opt out work with the same notes in another editor, since they're plain
+     Markdown; Obsidian suggests standard Markdown links for that class. There is no form and
+     no written permission on a student's behalf: **the school keeps the consent or opt-out
+     record.** The full email is in seno's and Samuel's inboxes.
+   - **What this means:** students can use Obsidian once parents have agreed or not opted
+     out. Teachers and staff can use it now. A student who opts out gets an open-source
+     editor (SilverBullet or Logseq); the Locker files don't change.
+   - **Still to decide (seno):** consent or opt-out, and where the school keeps that record
+     (the handout and Blackbaud, or a field on the family record in the viewer). And links:
+     the format uses `[[wikilinks]]` (`docs/format.md`), which Obsidian, SilverBullet and
+     Logseq all read but plain Markdown tools don't. Either keep wikilinks (any opt-out
+     student uses one of those editors), or switch the Locker to standard links (Obsidian's
+     "Use [[Wikilinks]]" setting off; `omalocker` and the viewer would have to write and read
+     both).
 2. **Backup key: one per person or one for the school** (`docs/backup.md`). Recommended:
    one per person, made at device setup and copied to IT.
 3. **Where the viewer runs** (a school server or a hosted service) and who keeps it running.

@@ -90,6 +90,10 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
   the teacher's own levels, not the student's editable copy; forms refuse other sites
   (Origin / Sec-Fetch-Site); anonymous refusals logged once per 10 s; staged pushes capped
   (20,000 notes, 128 MB); NUL bytes can't break a page; `share:` lists in any YAML style.
+- 2026-11-11: Obsidian answered (plan decision 1): parent consent or an opt-out in the usual
+  handouts meets the age line; the school keeps the record; opt-out students use another
+  editor on the same files. Open (seno): consent vs opt-out, where the record lives, and
+  whether to keep [[wikilinks]] (Obsidian suggests standard links for opt-out classes).
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
   `docs/plan.md` (backup key, where the viewer runs, parent sign-in, custody records);
