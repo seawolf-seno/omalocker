@@ -10,3 +10,6 @@ build/
 pyproject.toml
 uv.lock
 .python-version
+
+# Graphify output (experiments/graphify): results.md is the write-up
+experiments/graphify/syllabi/graphify-out/

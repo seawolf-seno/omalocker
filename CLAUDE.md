@@ -73,6 +73,9 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
   runs pull-levels, push, send-levels. Agents still never open roster.toml/mastery.csv.
 - 2026-11-10: OmaClass room: class.toml `room` (what OmaClass reads) -> teacher's class note
   (import) and student's class note (sent with levels; pull-levels updates room/block/day).
+- 2026-11-10: Graphify experiment (experiments/graphify, fictional syllabi, claude-cli backend):
+  found 4/4 planted joints (3 as hyperedges), 0 false; watch boilerplate links. Next: real
+  syllabi on seno's machine, teachers judge (results.md).
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
   `docs/plan.md` (backup key, where the viewer runs, parent sign-in, custody records);
