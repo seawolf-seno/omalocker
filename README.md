@@ -29,10 +29,10 @@ from Formation Pathways.
 
 OmaLocker's own app where parents, teachers, advisors and activity leaders open the views
 they're allowed to see. One stdlib Python file (SQLite, behind a TLS proxy): one-time
-sign-in links, family records with primary custody, grants, a role check on every page.
+sign-in links, family records with primary custody, grants, a role check on every page, and an access log (`omalocker-viewer audit`).
 Staging only for now. See `docs/viewer.md`.
 
 `make test` runs the unit tests (backup tests need `restic`, or `OMALOCKER_RESTIC=/path/to/restic`); `make test-connections` builds a fictional school in a temp
 `HOME` and runs every connection built so far.
 
-Status: Phase 1 commands built (init, import classes, mastery, doctor), encrypted backup/restore, per-audience views on the device, and a first viewer (staging, fictional people), and graduation. Next: audit log, emailed sign-in links, family records from the school's records; or packaging in pacos.
+Status: Phase 1 commands built (init, import classes, mastery, doctor), encrypted backup/restore, per-audience views on the device, a first viewer (staging, fictional people) with an access log, and graduation. Next: emailed sign-in links and family records from the school's records (waiting on Mr. Eno); or packaging in pacos.

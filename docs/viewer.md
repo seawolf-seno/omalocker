@@ -23,7 +23,7 @@ Still open (see `docs/plan.md`, decisions still open 3–5):
   import from the school's records, and decide who updates custody changes.
 - Graduation: `omalocker-viewer graduate <email>` (list) / `--yes` (delete); see
   `docs/graduation.md`.
-- Not built yet: the teacher → student levels flow, attachments, an audit log of who opened what, rate limits.
+- Not built yet: the teacher → student levels flow, attachments, rate limits.
 
 ## Who sees what
 
@@ -43,6 +43,30 @@ they have their Locker.
 
 The viewer also re-checks every push and refuses one that holds a private note,
 `AGENTS.md`, or a note about a classmate, even though the device already leaves them out.
+
+## Access log
+
+Every opened view and note, every refused attempt to open a student's view, sign-ins
+(and failed ones), sign-outs, pushes (and refused ones), and every admin command (people,
+grants, sign-in links, push tokens, graduation) are written to the `audit` table: time,
+who (their email at the time), action, student, view, note path, result.
+
+```sh
+omalocker-viewer audit                         # newest 100
+omalocker-viewer audit --student rowan@student.example.org
+omalocker-viewer audit --person okafor@example.org --since 2026-11-01
+omalocker-viewer audit --denied                # refused or failed only
+omalocker-viewer audit --json
+```
+
+No IP addresses (behind the proxy they'd be the proxy's). Only the admin CLI reads it.
+
+At graduation the student's entries are deleted with everything else (decision 6), and the
+emails of deleted people are blanked in the rows that remain; one line records that a
+graduation happened, with no name. **To confirm (seno, with counsel):** FERPA's record of
+disclosures (34 CFR 99.32) is normally kept as long as the records; since the records
+themselves are deleted, this deletes the log too. Also open: should families see who
+opened their child's Locker?
 
 ## Staging and production
 

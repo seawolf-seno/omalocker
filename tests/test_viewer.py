@@ -346,6 +346,69 @@ class Viewer(unittest.TestCase):
         self.assertNotIn(b"Rowan Teague", raw)
         self.assertNotIn(b"yeast respiration", raw)
 
+    def audit_log(self, *argv):
+        return json.loads(self.admin("audit", "--json", *argv))
+
+    def test_access_log_records_opens_refusals_and_changes(self):
+        self.push()
+        teacher = self.browser("biology")
+        self.get(teacher, self.url("teacher", "Biology"))
+        self.get(teacher, self.url("teacher", "Biology", "Journal/2026-11-10.md"))
+        self.get(teacher, self.url("parent"))                       # not theirs
+        self.post(self.browser(), "/signin", {"t": "x" * 43}, expect=400)
+
+        mine = self.audit_log("--person", PEOPLE["biology"])
+        self.assertEqual([(e["action"], e["audience"], e["path"], e["result"]) for e in mine], [
+            ("sign-in", "", "", "ok"),
+            ("open", "teacher", "", "ok"),
+            ("open", "teacher", "Journal/2026-11-10.md", "ok"),
+            ("open", "parent", "", "denied"),
+        ])
+        self.assertTrue(all(e["actor"] == PEOPLE["biology"] for e in mine))
+        self.assertEqual(mine[1]["student"], STUDENT)
+
+        everything = self.audit_log()
+        actions = [e["action"] for e in everything]
+        for action in ("person-add", "grant", "push-token", "push", "sign-in-link"):
+            self.assertIn(action, actions)
+        self.assertTrue(all(e["actor"].startswith("cli") for e in everything
+                            if e["action"] in ("grant", "person-add")))
+        push = [e for e in everything if e["action"] == "push"][0]
+        self.assertEqual((push["student"], push["detail"]), (STUDENT, "8 views, 67 notes"))
+        denied = self.audit_log("--denied")
+        self.assertEqual({(e["action"], e["result"]) for e in denied},
+                         {("open", "denied"), ("sign-in", "denied")})
+
+        self.raw_push({"views": []}, token="y" * 43)
+        self.raw_push({"views": [{"audience": "parent", "as_of": "x", "notes": [
+            {"path": "AGENTS.md", "text": "---\ntype: guide\n---\n"}]}]})
+        refused = [e for e in self.audit_log("--denied") if e["action"] == "push"]
+        self.assertEqual([e["result"] for e in refused], ["denied", "refused"])
+        self.assertIn("AGENTS.md", refused[1]["detail"])
+
+        text = self.admin("audit", "--student", STUDENT)
+        self.assertIn("Journal/2026-11-10.md", text)
+        self.assertIn("DENIED", text)
+
+    def test_graduation_removes_the_student_from_the_log(self):
+        self.push()
+        parent = self.browser("parent")
+        self.get(parent, self.url("parent"))
+        self.assertTrue(self.audit_log("--student", STUDENT))
+        self.admin("graduate", STUDENT, "--yes")
+        log = self.audit_log("--limit", "1000")
+        dump = json.dumps(log)
+        for gone in (STUDENT, PEOPLE["parent"], PEOPLE["other_parent"]):
+            self.assertNotIn(gone, dump)
+        self.assertFalse([e for e in log if e["student"]])
+        self.assertIn(PEOPLE["biology"], dump)   # staff still in the log (their grant line went)
+        last = log[-1]
+        self.assertEqual(last["action"], "graduate")
+        self.assertRegex(last["detail"], r"student #1: .* \d+ access-log entries deleted")
+        raw = (self.data / "viewer.db").read_bytes()
+        self.assertNotIn(STUDENT.encode(), raw)
+        self.assertNotIn(PEOPLE["parent"].encode(), raw)
+
     def test_graduate_only_students(self):
         code, err = self.admin("graduate", PEOPLE["parent"], "--yes", ok=False)
         self.assertEqual(code, 1)

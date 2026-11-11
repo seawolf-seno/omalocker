@@ -44,7 +44,10 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
 - 2026-11-10: graduation: `omalocker graduate --to DIR` (zip for the student, then no push or
   backup; `graduated.json` in state), `omalocker-viewer graduate EMAIL [--yes]` (deletes
   student, views, grants, token, family logins with no other student). IT deletes backups.
+- 2026-11-10: viewer access log (`audit` table, `omalocker-viewer audit`): opens, refusals,
+  sign-ins, pushes, admin commands. Graduation deletes the student's entries and blanks
+  deleted people's emails (to confirm against FERPA 99.32).
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
   `docs/plan.md` (backup key, where the viewer runs, parent sign-in, custody records);
-  viewer: audit log, emailed links, records import; then pacos packaging. Notes about classmates are in no view (seno, 2026-11-10).
+  viewer: emailed links, records import (after Mr. Eno answers); then pacos packaging. Notes about classmates are in no view (seno, 2026-11-10).

@@ -113,6 +113,9 @@ if curl -s -b "$HOME/parent1@example.org.jar" "$base/s/1/parent/?all=1" | grep -
   echo "a private note reached the viewer" >&2; exit 1
 fi
 echo "role checks pass: custodial parent, non-custodial parent, teacher"
+"$viewer" audit --person okafor@example.org | grep -q "teacher/Biology"
+"$viewer" audit --person okafor@example.org --denied | grep -q "parent  DENIED"
+echo "access log records opens and refusals"
 
 step "Graduation: hand over the Locker, stop the device, delete from the viewer"
 "$omalocker" --locker "$student" graduate --to "$HOME/usb"
@@ -127,6 +130,9 @@ fi
 [ "$(code parent1@example.org /s/1/parent/)" = 303 ]   # login gone with the student
 [ "$(code okafor@example.org /s/1/teacher/Biology/)" = 404 ]
 "$viewer" list | grep -q okafor@example.org             # staff stay
+if "$viewer" audit --limit 1000 | grep -q -e rowan@ -e parent1@; then
+  echo "graduated student or family still in the access log" >&2; exit 1
+fi
 if "$viewer" list | grep -q -e rowan@ -e parent1@; then
   echo "graduated student or family still in the viewer" >&2; exit 1
 fi

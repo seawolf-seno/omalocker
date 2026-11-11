@@ -14,6 +14,7 @@ the student before showing anything. See docs/viewer.md.
   omalocker-viewer sign-in-link EMAIL
   omalocker-viewer push-token STUDENT_EMAIL
   omalocker-viewer graduate STUDENT_EMAIL [--yes]
+  omalocker-viewer audit [--student E] [--person E] [--since DATE] [--denied]
   omalocker-viewer list
   omalocker-viewer serve [--host 127.0.0.1] [--port 8380]
 """
@@ -102,6 +103,23 @@ CREATE TABLE IF NOT EXISTS notes (
   FOREIGN KEY (student_id, audience, scope)
     REFERENCES views(student_id, audience, scope) ON DELETE CASCADE
 );
+-- Who opened what, and every change. No foreign keys: entries outlive the rows they
+-- mention, except at graduation (docs/viewer.md, "Access log").
+CREATE TABLE IF NOT EXISTS audit (
+  id INTEGER PRIMARY KEY,
+  at REAL NOT NULL,
+  actor_id INTEGER,
+  actor TEXT NOT NULL,
+  action TEXT NOT NULL,
+  student_id INTEGER,
+  audience TEXT NOT NULL DEFAULT '',
+  scope TEXT NOT NULL DEFAULT '',
+  path TEXT NOT NULL DEFAULT '',
+  result TEXT NOT NULL DEFAULT 'ok',
+  detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS audit_student ON audit (student_id, at);
+CREATE INDEX IF NOT EXISTS audit_actor ON audit (actor_id, at);
 """
 
 
@@ -111,6 +129,27 @@ class ViewerError(Exception):
 
 def digest(token):
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+def audit(db, actor, action, student_id=None, audience="", scope="", path="",
+          result="ok", detail=""):
+    """Append one access-log entry. actor: a people row, or a label like 'device'."""
+    if isinstance(actor, sqlite3.Row):
+        actor_id, label = actor["id"], actor["email"]
+    else:
+        actor_id, label = None, str(actor)
+    db.execute("INSERT INTO audit (at, actor_id, actor, action, student_id, audience, scope, "
+               "path, result, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+               (clock(), actor_id, label, action, student_id, audience, scope or "",
+                path, result, detail))
+
+
+def cli_actor():
+    import getpass
+    try:
+        return f"cli:{getpass.getuser()}"
+    except Exception:
+        return "cli"
 
 
 # ---------------------------------------------------------------- storage
@@ -543,7 +582,7 @@ class Viewer:
             self.db.execute("INSERT INTO sessions VALUES (?, ?, ?)",
                             (digest(session), row["person_id"], clock() + SESSION_TTL))
             self.db.execute("COMMIT")
-            return session
+            return session, row["person_id"]
         except BaseException:
             self.db.execute("ROLLBACK")
             raise
@@ -747,14 +786,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             scope, rest = rest[0], rest[1:]
         if rest and rest[-1] == "":
             rest = rest[:-1]
+        note_path = "/".join(rest[1:]) if rest and rest[0] == "n" else ""
         if not can_see(v.db, person, student_id, audience, scope):
+            audit(v.db, person, "open", student_id, audience, scope, note_path, "denied")
             return self.not_found(person)
         student = v.db.execute("SELECT * FROM people WHERE id = ?", (student_id,)).fetchone()
         if not rest:
-            return self.send(200, v.index_page(person, student, audience, scope,
-                                               bool(query.get("all"))))
-        if rest[0] == "n" and len(rest) > 1:
-            html_page = v.note_page(person, student, audience, scope, "/".join(rest[1:]))
+            show_all = bool(query.get("all"))
+            audit(v.db, person, "open", student_id, audience, scope,
+                  detail="everything" if show_all else "")
+            return self.send(200, v.index_page(person, student, audience, scope, show_all))
+        if note_path:
+            html_page = v.note_page(person, student, audience, scope, note_path)
+            audit(v.db, person, "open", student_id, audience, scope, note_path,
+                  "ok" if html_page else "missing")
             if html_page:
                 return self.send(200, html_page)
         return self.not_found(person)
@@ -765,6 +810,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/push":
             student_id = v.push_student(self.headers.get("Authorization"))
             if student_id is None:
+                audit(v.db, "device", "push", result="denied", detail="bad push token")
                 return self.send(401, json.dumps({"error": "bad push token"}), "application/json")
             raw = self.read_body(MAX_PUSH)
             if raw is None:
@@ -773,18 +819,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 result = accept_push(v.db, student_id, json.loads(raw))
             except (ValueError, ViewerError, AttributeError, TypeError) as e:
                 msg = str(e) if isinstance(e, ViewerError) else "push isn't valid JSON views"
+                audit(v.db, "device", "push", student_id, result="refused", detail=msg)
                 return self.send(422, json.dumps({"error": msg}), "application/json")
+            audit(v.db, "device", "push", student_id,
+                  detail=f"{result['views']} views, {result['notes']} notes")
             return self.send(200, json.dumps({"ok": True, **result}), "application/json")
         raw = self.read_body(4096)
         form = urllib.parse.parse_qs((raw or b"").decode(errors="replace"))
         if path == "/signin":
-            session = v.sign_in((form.get("t") or [""])[0])
-            if not session:
+            signed = v.sign_in((form.get("t") or [""])[0])
+            if not signed:
+                audit(v.db, "unknown", "sign-in", result="denied",
+                      detail="used, expired or unknown link")
                 body = ("<h1>That link doesn't work</h1><p>It was already used or has expired. "
                         "Ask the school office for a new one.</p>")
                 return self.send(400, page(v.cfg, "Sign in", body))
+            session, person_id = signed
+            who = v.db.execute("SELECT * FROM people WHERE id = ?", (person_id,)).fetchone()
+            audit(v.db, who, "sign-in")
             return self.redirect("/", [self.cookie(session, SESSION_TTL)])
         if path == "/signout":
+            who = v.session_person(self.headers.get("Cookie"))
+            if who:
+                audit(v.db, who, "sign-out")
             v.sign_out(self.headers.get("Cookie"))
             return self.redirect("/", [self.cookie("", 0)])
         return self.not_found()
@@ -838,6 +895,8 @@ def cmd_person(args):
                          (args.name, email, int(args.student), args.grad_year, int(args.admin)))
     except sqlite3.IntegrityError:
         raise ViewerError(f"{email} is already here")
+    audit(db, cli_actor(), "person-add", cur.lastrowid if args.student else None,
+          detail=f"{email}{' student' if args.student else ''}{' admin' if args.admin else ''}")
     print(f"added {args.name} (id {cur.lastrowid})")
     return 0
 
@@ -853,6 +912,9 @@ def cmd_grant(args, revoke=False):
     if revoke:
         n = db.execute("DELETE FROM grants WHERE person_id = ? AND student_id = ? AND audience = ? "
                        "AND scope = ?", (person["id"], student["id"], args.audience, scope)).rowcount
+        if n:
+            audit(db, cli_actor(), "revoke", student["id"], args.audience, scope,
+                  detail=person["email"])
         print("revoked" if n else "nothing to revoke")
         return 0
     if args.primary_custody and args.audience != "parent":
@@ -861,6 +923,8 @@ def cmd_grant(args, revoke=False):
         raise ViewerError("a student has their own Locker; no grant needed")
     db.execute("INSERT OR REPLACE INTO grants VALUES (?, ?, ?, ?, ?)",
                (person["id"], student["id"], args.audience, scope, int(args.primary_custody)))
+    audit(db, cli_actor(), "grant", student["id"], args.audience, scope,
+          detail=person["email"] + (" primary custody" if args.primary_custody else ""))
     note = ""
     if args.audience == "parent" and not args.primary_custody:
         note = " (no primary custody: recorded, but this parent sees no view)"
@@ -874,6 +938,7 @@ def cmd_sign_in_link(args):
     token = secrets.token_urlsafe(32)
     db.execute("INSERT INTO sign_in VALUES (?, ?, ?)",
                (digest(token), person["id"], clock() + SIGN_IN_TTL))
+    audit(db, cli_actor(), "sign-in-link", detail=person["email"])
     print(f"{cfg['base_url']}/signin?t={token}")
     return 0
 
@@ -886,6 +951,7 @@ def cmd_push_token(args):
     token = secrets.token_urlsafe(32)
     db.execute("INSERT OR REPLACE INTO push_tokens VALUES (?, ?, ?)",
                (digest(token), student["id"], clock()))
+    audit(db, cli_actor(), "push-token", student["id"])
     print(token)
     print("Shown once. Put it in the student's device push key file "
           "(docs/viewer.md); the old token stops working.", file=sys.stderr)
@@ -907,6 +973,7 @@ def graduation_plan(db, student):
         "notes": count("SELECT COUNT(*) FROM notes WHERE student_id = ?"),
         "grants": count("SELECT COUNT(*) FROM grants WHERE student_id = ?"),
         "push_token": count("SELECT COUNT(*) FROM push_tokens WHERE student_id = ?"),
+        "audit": count("SELECT COUNT(*) FROM audit WHERE student_id = ?"),
         "family": family,
     }
 
@@ -920,6 +987,7 @@ def cmd_graduate(args):
     print(f"Graduating {student['name']} <{student['email']}> deletes:")
     print(f"  {plan['views']} views ({plan['notes']} notes), {plan['grants']} grants, "
           f"{'the' if plan['push_token'] else 'no'} push token, and their login")
+    print(f"  {plan['audit']} access-log entries about them")
     for f in plan["family"]:
         print(f"  family login {f['name']} <{f['email']}> (no other student here)")
     print("  Teachers, advisors, leaders and family with another student here stay.")
@@ -928,6 +996,18 @@ def cmd_graduate(args):
         return 0
     db.execute("BEGIN IMMEDIATE")
     try:
+        gone = [student["id"]] + [f["id"] for f in plan["family"]]
+        marks = ",".join("?" * len(gone))
+        logged = db.execute("DELETE FROM audit WHERE student_id = ?", (student["id"],)).rowcount
+        db.execute(f"UPDATE audit SET actor = 'deleted #' || actor_id, detail = '' "
+                   f"WHERE actor_id IN ({marks})", gone)
+        emails = [student["email"]] + [f["email"] for f in plan["family"]]
+        db.execute(f"UPDATE audit SET detail = '' WHERE detail IN "
+                   f"({','.join('?' * len(emails))}) OR "
+                   + " OR ".join("detail LIKE ?" for _ in emails),
+                   [*emails, *[e + " %" for e in emails]])
+        audit(db, cli_actor(), "graduate", detail=f"student #{student['id']}: views, logins, "
+              f"records and {logged} access-log entries deleted")
         for f in plan["family"]:
             db.execute("DELETE FROM people WHERE id = ?", (f["id"],))
         # Cascades: grants, views, notes, push token, sign-in links, sessions.
@@ -939,6 +1019,55 @@ def cmd_graduate(args):
     db.execute("VACUUM")  # deleted rows shouldn't linger in the file
     db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     print("Deleted.")
+    return 0
+
+
+def cmd_audit(args):
+    cfg, db = open_admin(args)
+    where, params = [], []
+    if args.student:
+        where.append("a.student_id = ?")
+        params.append(person_by_email(db, args.student)["id"])
+    if args.person:
+        where.append("a.actor_id = ?")
+        params.append(person_by_email(db, args.person)["id"])
+    if args.since:
+        import datetime
+        try:
+            since = datetime.datetime.fromisoformat(args.since)
+        except ValueError:
+            raise ViewerError("--since takes a date, like 2026-11-01")
+        where.append("a.at >= ?")
+        params.append(since.timestamp())
+    if args.denied:
+        where.append("a.result != 'ok'")
+    sql = ("SELECT a.*, s.email AS student FROM audit a LEFT JOIN people s ON s.id = a.student_id"
+           + (" WHERE " + " AND ".join(where) if where else "")
+           + " ORDER BY a.at DESC, a.id DESC LIMIT ?")
+    rows = db.execute(sql, (*params, args.limit)).fetchall()[::-1]
+    import datetime
+
+    def when(r):
+        return datetime.datetime.fromtimestamp(r["at"]).astimezone().isoformat(timespec="seconds")
+
+    if args.json:
+        print(json.dumps([{"at": when(r), "actor": r["actor"], "action": r["action"],
+                           "student": r["student"] or (f"#{r['student_id']}" if r["student_id"] else None),
+                           "audience": r["audience"], "scope": r["scope"], "path": r["path"],
+                           "result": r["result"], "detail": r["detail"]} for r in rows], indent=2))
+        return 0
+    for r in rows:
+        student = r["student"] or (f"#{r['student_id']}" if r["student_id"] else "")
+        view = r["audience"] + (f"/{r['scope']}" if r["scope"] else "")
+        bits = [when(r), r["actor"], r["action"]]
+        bits += [b for b in (student, view, r["path"]) if b]
+        if r["result"] != "ok":
+            bits.append(r["result"].upper())
+        if r["detail"]:
+            bits.append(f"({r['detail']})")
+        print("  ".join(bits))
+    if not rows:
+        print("no entries")
     return 0
 
 
@@ -1014,6 +1143,15 @@ def main(argv=None):
     p.add_argument("email")
     p.add_argument("--yes", action="store_true", help="delete (without it: only list)")
     p.set_defaults(func=cmd_graduate)
+
+    p = sub.add_parser("audit", help="access log: who opened what, and every change")
+    p.add_argument("--student", help="entries about this student (email)")
+    p.add_argument("--person", help="entries by this person (email)")
+    p.add_argument("--since", help="from this date (YYYY-MM-DD)")
+    p.add_argument("--denied", action="store_true", help="only refused or failed")
+    p.add_argument("--limit", type=int, default=100, help="newest N (default 100)")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_audit)
 
     p = sub.add_parser("list", help="people and grants")
     p.set_defaults(func=cmd_list)
