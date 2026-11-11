@@ -47,6 +47,10 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
 - 2026-11-10: viewer access log (`audit` table, `omalocker-viewer audit`): opens, refusals,
   sign-ins, pushes, admin commands. Graduation deletes the student's entries and blanks
   deleted people's emails (to confirm against FERPA 99.32).
+- 2026-11-10: Mr. Eno: viewer on Vercel, parents sign in by emailed one-time link, phones
+  first (decisions 9–11). Parent view reworked for phones (cards, plain titles, levels on the
+  overview, one child = straight in, 30-day sessions). Demo for his wife:
+  https://claude.ai/artifact/A7hdqunn4MX26qXwHgMUa9 (fictional; built from real pages).
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
   `docs/plan.md` (backup key, where the viewer runs, parent sign-in, custody records);

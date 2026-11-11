@@ -25,6 +25,17 @@ Still open (see `docs/plan.md`, decisions still open 3–5):
   `docs/graduation.md`.
 - Not built yet: the teacher → student levels flow, attachments, rate limits.
 
+## Moving to Vercel (decided 2026-11-10, not built)
+
+Vercel runs Python as functions, not a long-running server, and has no lasting disk. So:
+- **Code:** the handler maps onto Vercel's Python runtime (an `api/` function with a
+  `BaseHTTPRequestHandler` class); the admin CLI stays a local tool that talks to the database.
+- **Database:** SQLite on disk won't survive. Options: Vercel's Postgres (Neon) or Turso
+  (libSQL, close to SQLite). Either holds student data at a third party.
+- **Email:** sign-in links need a mail service (for example Resend or Postmark).
+- **Contracts:** Vercel, the database host and the mail service each need a data processing
+  agreement before real student data goes there (FERPA "school official" terms).
+
 ## Who sees what
 
 Every request checks the signed-in person against the student:
@@ -106,7 +117,9 @@ student's views. `omalocker push` only sends over `https://` (or to this machine
   SHA-256 is stored.
 - Opening a sign-in link shows a button; the link is used only when it's pressed, so mail
   scanners that open links don't use it up.
-- Session cookie: `HttpOnly`, `SameSite=Strict`, `Secure` when the base URL is https; 12 hours.
+- Session cookie: `HttpOnly`, `SameSite=Strict`, `Secure` when the base URL is https; 30 days,
+  so a parent's phone stays signed in (signing out ends it). `timezone` in `config.toml`
+  (default America/Los_Angeles) sets how times are shown.
 - Pages: strict Content-Security-Policy (no scripts at all), `no-store`, `no-referrer`,
   no framing. Note text is escaped; only headings, lists, tables, quotes, code, bold,
   italics and links are rendered. Wiki links resolve only to notes in the same view;

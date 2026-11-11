@@ -164,14 +164,21 @@ graduate` deletes their views, login and family records; IT deletes their backup
    logins, records or data, and no pathway copy from FP).
 8. **Classmates:** a student's notes about classmates go in no view, the parent view
    included.
+9. **Viewer host (Mr. Eno, 2026-11-10):** Vercel. The viewer has to move off a long-running
+   server and a local SQLite file (`docs/viewer.md`, "Moving to Vercel").
+10. **Parent sign-in (Mr. Eno, 2026-11-10):** one-time sign-in links, emailed. To be tried
+    with a real parent (Mr. Eno's wife) first.
+11. **Phones first (Mr. Eno, 2026-11-10):** parents mostly use phones; the parent view has to
+    be as easy as possible ("if she actually uses it, we're on to something").
 
 Leadership and counsel should still confirm 3–5 against FERPA before the pilot (FERPA
 rights normally move to the student at 18).
 
 ## Decisions still open
 
-Asked Mr. Eno by email (2026-11-10): 3, 4 and 5 below, plus the FERPA check on parent access
-after 18. Waiting for his answer.
+Asked Mr. Eno by email (2026-11-10): he answered where the viewer runs (Vercel) and parent
+sign-in (emailed one-time links): decisions 9–10. Still open: 5 (custody records) and the
+FERPA check.
 
 1. **Obsidian for students under 18.** Checked 2026-11-10 (terms, license and privacy
    policy all last updated 2025 or earlier):

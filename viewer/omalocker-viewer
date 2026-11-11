@@ -44,7 +44,7 @@ CANT_HIDE = {"milestone", "mastery", "objective"}  # same as bin/omalocker
 TEST_DOMAIN = re.compile(r"(^|\.)(example|test|invalid|example\.(com|org|net))$")
 
 SIGN_IN_TTL = 15 * 60
-SESSION_TTL = 12 * 3600
+SESSION_TTL = 30 * 24 * 3600
 MAX_PUSH = 32 * 1024 * 1024
 MAX_NOTE = 1024 * 1024
 COOKIE = "olv_session"
@@ -387,18 +387,26 @@ def split_front(text):
     return [], text
 
 
-def render_markdown(text, resolve):
+def render_markdown(text, resolve, title=None):
     front, body = split_front(text)
     body = re.sub(r"<!--.*?-->", "", body, flags=re.S)
     out = []
+    if title and not re.search(r"(?m)^#\s", body):
+        out.append(f"<h2>{html.escape(title)}</h2>")
     if front:
-        out.append('<table class="props">')
         props = frontmatter("---\n" + "\n".join(front) + "\n---")
+        rows = []
         for key, value in props.items():
-            values = value if isinstance(value, list) else [value]
-            cell = ", ".join(inline(str(v), resolve) for v in values)
-            out.append(f"<tr><th>{html.escape(key)}</th><td>{cell}</td></tr>")
-        out.append("</table>")
+            values = [v for v in (value if isinstance(value, list) else [value]) if str(v).strip()]
+            if key in HIDDEN_PROPS or not values:
+                continue
+            shown = [nice_date(v) if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(v)) else str(v)
+                     for v in values]
+            cell = ", ".join(inline(v, resolve) for v in shown)
+            label = key.replace("_", " ").capitalize()
+            rows.append(f"<tr><th>{html.escape(label)}</th><td>{cell}</td></tr>")
+        if rows:
+            out.append('<table class="props">' + "".join(rows) + "</table>")
     lines, i, para = body.split("\n"), 0, []
 
     def flush():
@@ -474,33 +482,64 @@ def render_markdown(text, resolve):
 # ---------------------------------------------------------------- pages
 
 STYLE = """
-:root{--bg:#fbfaf7;--fg:#1d1d1b;--muted:#6b6a64;--line:#e3e0d8;--accent:#2f5d8a;--warn:#8a4b00;--card:#fff}
-@media (prefers-color-scheme:dark){:root{--bg:#161614;--fg:#e9e7e1;--muted:#a19e95;--line:#33322e;--accent:#8db6e0;--warn:#e0a35c;--card:#1e1e1b}}
+:root{--bg:#fbfaf7;--fg:#1d1d1b;--muted:#6b6a64;--line:#e3e0d8;--accent:#2f5d8a;--warn:#8a4b00;
+  --card:#fff;--chip:#eef2f6}
+@media (prefers-color-scheme:dark){:root{--bg:#161614;--fg:#e9e7e1;--muted:#a19e95;--line:#33322e;
+  --accent:#8db6e0;--warn:#e0a35c;--card:#1e1e1b;--chip:#26303a}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,sans-serif}
-main{max-width:46rem;margin:0 auto;padding:1.5rem 1rem 4rem}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:17px/1.55 system-ui,-apple-system,sans-serif}
+main{max-width:40rem;margin:0 auto;padding:1rem 1rem 4rem}
 a{color:var(--accent)}
 header.top{display:flex;justify-content:space-between;align-items:center;gap:1rem;
-  border-bottom:1px solid var(--line);padding:.75rem 1rem}
+  border-bottom:1px solid var(--line);padding:.6rem 1rem}
+header.top .brand{font-weight:600;text-decoration:none;color:var(--fg)}
 header.top form{margin:0}
-.staging{background:var(--warn);color:var(--bg);text-align:center;font-weight:600;padding:.25rem}
-.asof{color:var(--muted);font-size:.9rem}
+.staging{background:var(--warn);color:var(--bg);text-align:center;font-weight:600;padding:.25rem;font-size:.85rem}
+.asof,.muted{color:var(--muted);font-size:.9rem}
 .unlinked{color:var(--muted)}
-table{border-collapse:collapse;margin:1rem 0;width:100%}
-th,td{border:1px solid var(--line);padding:.35rem .6rem;text-align:left;vertical-align:top}
-table.props th{width:9rem;color:var(--muted);font-weight:500}
+h1{font-size:1.6rem;line-height:1.25;margin:.75rem 0 .25rem}
+h2{font-size:1.1rem;margin:1.75rem 0 .5rem}
+.back{display:inline-block;padding:.5rem 0;text-decoration:none}
+ul.cards{list-style:none;padding:0;margin:0;display:grid;gap:.5rem}
+ul.cards a.card{display:block;padding:.8rem 1rem;background:var(--card);border:1px solid var(--line);
+  border-radius:12px;text-decoration:none;color:var(--fg)}
+ul.cards a.card:active{background:var(--chip)}
+.card .title{font-weight:600;color:var(--accent)}
+.card .sub{color:var(--muted);font-size:.92rem;margin-top:.15rem}
+.levels{list-style:none;padding:0;margin:.4rem 0 0;display:grid;gap:.25rem}
+.levels li{display:flex;justify-content:space-between;gap:1rem;font-size:.95rem}
+.level{background:var(--chip);border-radius:999px;padding:0 .6rem;white-space:nowrap}
+.more{display:block;text-align:center;margin:1.5rem 0;padding:.8rem;border:1px solid var(--line);
+  border-radius:12px;text-decoration:none;background:var(--card)}
+table{border-collapse:collapse;margin:1rem 0;width:100%;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:.4rem .6rem;text-align:left;vertical-align:top}
+table.props{display:table;font-size:.95rem}
+table.props th{width:7.5rem;color:var(--muted);font-weight:500}
 pre{background:var(--card);border:1px solid var(--line);padding:.75rem;overflow-x:auto}
 blockquote{border-left:3px solid var(--line);margin:1rem 0;padding-left:1rem;color:var(--muted)}
-ul.views li,ul.notes li{margin:.25rem 0}
-h2{margin-top:2rem}
-button{font:inherit;padding:.4rem .9rem;border:1px solid var(--line);background:var(--card);
-  color:var(--fg);border-radius:6px;cursor:pointer}
+article{overflow-wrap:anywhere}
+button{font:inherit;padding:.45rem 1rem;border:1px solid var(--line);background:var(--card);
+  color:var(--fg);border-radius:8px;cursor:pointer}
+button.big{display:block;width:100%;padding:.9rem;font-size:1.1rem;font-weight:600;
+  background:var(--accent);color:var(--bg);border:none;border-radius:12px;margin-top:1rem}
 """
 
 AUDIENCE_LABEL = {"parent": "Family view", "advisor": "Advisor view",
                   "teacher": "Teacher view", "activity": "Activity view"}
-TYPE_ORDER = ["person", "class", "mastery", "objective", "milestone", "pathway", "work",
-              "journal", "idea", "joint", "activity", "home", "inbox"]
+# Section names people read, in the order they're shown.
+SECTIONS = [
+    ("mastery", "How it's going"), ("milestone", "Milestones"), ("pathway", "Goals"),
+    ("class", "Classes"), ("work", "Work"), ("journal", "Journal"),
+    ("activity", "Activities"), ("idea", "Big ideas"), ("joint", "Big ideas"),
+    ("objective", "Learning targets"), ("person", "People"), ("home", "Home"),
+    ("inbox", "Notes"),
+]
+SECTION_OF = dict(SECTIONS)
+NEWEST_FIRST = {"milestone", "journal"}
+# Properties that are bookkeeping, not something a reader needs.
+HIDDEN_PROPS = {"type", "source", "share", "omamastery", "tags", "canvas_assignment", "scope"}
+MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
 
 
 def esc(s):
@@ -515,18 +554,86 @@ def view_url(student_id, audience, scope):
     return f"/s/{student_id}/{audience}/" + (f"{q(scope)}/" if scope else "")
 
 
+def note_url(base, path):
+    return f'{base}n/{"/".join(q(p) for p in path.split("/"))}'
+
+
+def nice_date(value):
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", str(value or ""))
+    if not m or not 1 <= int(m.group(2)) <= 12:
+        return str(value or "")
+    return f"{MONTHS[int(m.group(2)) - 1]} {int(m.group(3))}, {m.group(1)}"
+
+
+def nice_time(cfg, iso):
+    import datetime
+    import zoneinfo
+    try:
+        when = datetime.datetime.fromisoformat(iso)
+        when = when.astimezone(zoneinfo.ZoneInfo(cfg.get("timezone") or "America/Los_Angeles"))
+    except (ValueError, TypeError, zoneinfo.ZoneInfoNotFoundError):
+        return str(iso)
+    hour = when.hour % 12 or 12
+    return (f"{MONTHS[when.month - 1]} {when.day}, {when.year} at "
+            f"{hour}:{when.minute:02d} {'AM' if when.hour < 12 else 'PM'}")
+
+
+def link_name(value):
+    m = LINK_RE.fullmatch(str(value).strip())
+    return (m.group(2) or m.group(1)).strip() if m else str(value)
+
+
+def note_title(path, kind):
+    name = path.rsplit("/", 1)[-1].removesuffix(".md")
+    if path == "Me.md":
+        return "About me"
+    if kind == "milestone":
+        name = re.sub(r"^\d{4}-\d{2}-\d{2}\s+", "", name)
+    if kind == "journal" and re.fullmatch(r"\d{4}-\d{2}-\d{2}", name):
+        return nice_date(name)
+    return name
+
+
+def note_sub(kind, props, text):
+    """One short line under a note's title, from its properties."""
+    get = lambda k: props.get(k) if isinstance(props.get(k), str) else ""
+    if kind == "class":
+        bits = [link_name(get("teacher")) if get("teacher") else "",
+                f"Room {get('room')}" if get("room") else "",
+                f"Block {get('block')}{get('day')}" if get("block") else ""]
+    elif kind in ("milestone", "pathway"):
+        bits = [nice_date(get("date") or get("updated"))]
+    elif kind == "work":
+        bits = [f"Due {nice_date(get('due'))}" if get("due") else "",
+                get("status").replace("-", " ")]
+    elif kind == "activity":
+        bits = [get("kind").capitalize(), get("season").capitalize()]
+    else:
+        bits = []
+    return " · ".join(b for b in bits if b)
+
+
+def mastery_levels(text):
+    """[(core idea, level)] from a mastery note's table."""
+    rows = []
+    for line in text.split("\n"):
+        cells = [c.strip() for c in line.strip().strip("|").split("|")] if line.strip().startswith("|") else []
+        if len(cells) >= 2 and cells[-1] in ("Not yet", "Beginning", "Developing", "Proficient", "Extending"):
+            rows.append((link_name(cells[0]), cells[-1]))
+    return rows
+
+
 def page(cfg, title, body, person=None):
-    staging = '<div class="staging">STAGING: fictional people only</div>' \
+    staging = '<div class="staging">Test version · made-up people only</div>' \
         if cfg["env"] == "staging" else ""
-    who = ""
-    if person:
-        who = (f'<span>{esc(person["name"])}</span>'
-               '<form method="post" action="/signout"><button>Sign out</button></form>')
+    who = ('<form method="post" action="/signout"><button>Sign out</button></form>'
+           if person else "")
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<meta name="color-scheme" content="light dark">'
             f'<title>{esc(title)} · OmaLocker</title>'
             f'<link rel="stylesheet" href="/style.css"></head><body>{staging}'
-            f'<header class="top"><a href="/">OmaLocker</a>{who}</header>'
+            f'<header class="top"><a class="brand" href="/">OmaLocker</a>{who}</header>'
             f'<main>{body}</main></body></html>')
 
 
@@ -605,13 +712,13 @@ class Viewer:
     def home_page(self, person):
         views = allowed_views(self.db, person)
         if not views:
-            body = ("<h1>Nothing to show yet</h1><p>No student's Locker is shared with you. "
+            body = (f"<h1>Hi {esc(person['name'])}</h1><p>Nothing is shared with you yet. "
                     "If that's wrong, ask the school office.</p>")
             return page(self.cfg, "Home", body, person)
         by_student = {}
         for s, audience, scope in views:
             by_student.setdefault(s["id"], (s, []))[1].append((audience, scope))
-        parts = ["<h1>Lockers you can see</h1>"]
+        parts = [f"<h1>Hi {esc(person['name'])}</h1>"]
         for s, entries in by_student.values():
             items = []
             for audience, scope in entries:
@@ -619,46 +726,66 @@ class Viewer:
                     "SELECT as_of FROM views WHERE student_id = ? AND audience = ? AND scope = ?",
                     (s["id"], audience, scope)).fetchone()
                 label = AUDIENCE_LABEL[audience] + (f": {esc(scope)}" if scope else "")
-                when = (f' <span class="asof">as of {esc(v["as_of"])}</span>' if v
-                        else ' <span class="asof">not shared from the device yet</span>')
-                items.append(f'<li><a href="{view_url(s["id"], audience, scope)}">{label}</a>{when}</li>')
-            parts.append(f'<h2>{esc(s["name"])}</h2><ul class="views">{"".join(items)}</ul>')
+                when = (f"Updated {esc(nice_time(self.cfg, v['as_of']))}" if v
+                        else "Not shared from the student's laptop yet")
+                items.append(f'<li><a class="card" href="{view_url(s["id"], audience, scope)}">'
+                             f'<div class="title">{label}</div><div class="sub">{when}</div></a></li>')
+            parts.append(f'<h2>{esc(s["name"])}</h2><ul class="cards">{"".join(items)}</ul>')
         return page(self.cfg, "Home", "".join(parts), person)
 
-    def view_header(self, student, audience, scope, v):
-        label = AUDIENCE_LABEL[audience] + (f": {esc(scope)}" if scope else "")
-        return (f'<p><a href="/">← All Lockers</a></p><h1>{esc(student["name"])}</h1>'
-                f'<p>{label} · <span class="asof">as of {esc(v["as_of"])}, from the '
-                f"student's device</span></p>")
+    def view_header(self, person, student, audience, scope, v, back=None):
+        many = len(allowed_views(self.db, person)) > 1
+        link = back or ("/", "All students") if many or back else None
+        top = f'<a class="back" href="{link[0]}">← {esc(link[1])}</a>' if link else ""
+        label = "" if audience == "parent" else (
+            f"{AUDIENCE_LABEL[audience]}{': ' + esc(scope) if scope else ''} · ")
+        return (f'{top}<h1>{esc(student["name"])}</h1>'
+                f'<p class="asof">{label}Updated {esc(nice_time(self.cfg, v["as_of"]))} '
+                f"from {'their' if audience == 'parent' else 'the student’s'} laptop</p>")
 
     def index_page(self, person, student, audience, scope, show_all):
         v = self.db.execute(
             "SELECT * FROM views WHERE student_id = ? AND audience = ? AND scope = ?",
             (student["id"], audience, scope)).fetchone()
         if not v:
-            body = (f'<p><a href="/">← All Lockers</a></p><h1>{esc(student["name"])}</h1>'
-                    "<p>This view hasn't been shared from the student's device yet.</p>")
+            body = (f'<h1>{esc(student["name"])}</h1>'
+                    "<p>Nothing here yet: this hasn't been shared from the student's laptop.</p>")
             return page(self.cfg, student["name"], body, person)
         notes = self.db.execute(
-            """SELECT path, type, summary FROM notes WHERE student_id = ? AND audience = ?
+            """SELECT path, type, summary, text FROM notes WHERE student_id = ? AND audience = ?
                AND scope = ? ORDER BY path""", (student["id"], audience, scope)).fetchall()
         first_page = audience == "parent" and not show_all
         shown = [n for n in notes if n["summary"]] if first_page else notes
-        groups = {}
-        for n in shown:
-            groups.setdefault(n["type"] or "other", []).append(n)
         base = view_url(student["id"], audience, scope)
-        parts = [self.view_header(student, audience, scope, v)]
-        for kind in sorted(groups, key=lambda k: (TYPE_ORDER.index(k) if k in TYPE_ORDER
-                                                 else len(TYPE_ORDER), k)):
-            items = "".join(
-                f'<li><a href="{base}n/{"/".join(q(p) for p in n["path"].split("/"))}">'
-                f'{esc(n["path"].removesuffix(".md"))}</a></li>' for n in groups[kind])
-            parts.append(f'<h2>{esc(kind.capitalize())}</h2><ul class="notes">{items}</ul>')
+        sections = {}
+        for n in shown:
+            if first_page and n["path"] == "Me.md":
+                continue  # the student's name is the page title; "About me" is one tap away
+            sections.setdefault(SECTION_OF.get(n["type"], "Other"), []).append(n)
+        order = list(dict.fromkeys(label for _, label in SECTIONS)) + ["Other"]
+        back = (base, "Overview") if audience == "parent" and show_all else None
+        parts = [self.view_header(person, student, audience, scope, v, back)]
+        for label in sorted(sections, key=order.index):
+            group = sections[label]
+            if group[0]["type"] in NEWEST_FIRST:
+                group = sorted(group, key=lambda n: n["path"], reverse=True)
+            items = []
+            for n in group:
+                props = frontmatter(n["text"])
+                sub = note_sub(n["type"], props, n["text"])
+                extra = ""
+                if n["type"] == "mastery":
+                    extra = "".join(f'<li><span>{esc(idea)}</span><span class="level">{esc(lvl)}</span></li>'
+                                    for idea, lvl in mastery_levels(n["text"]))
+                    extra = f'<ul class="levels">{extra}</ul>' if extra else ""
+                items.append(
+                    f'<li><a class="card" href="{note_url(base, n["path"])}">'
+                    f'<div class="title">{esc(note_title(n["path"], n["type"]))}</div>'
+                    + (f'<div class="sub">{esc(sub)}</div>' if sub else "") + extra + "</a></li>")
+            parts.append(f'<h2>{esc(label)}</h2><ul class="cards">{"".join(items)}</ul>')
         if first_page and len(notes) > len(shown):
-            parts.append(f'<p><a href="{base}?all=1">Show everything ({len(notes)} notes)</a></p>')
-        elif audience == "parent" and show_all:
-            parts.append(f'<p><a href="{base}">Back to the overview</a></p>')
+            parts.append(f'<a class="more" href="{base}?all=1">Show everything '
+                         f"({len(notes)} notes: work, journal, activities…)</a>")
         return page(self.cfg, student["name"], "".join(parts), person)
 
     def note_page(self, person, student, audience, scope, path):
@@ -670,25 +797,27 @@ class Viewer:
                AND path = ?""", (student["id"], audience, scope, path)).fetchone() if v else None
         if not note:
             return None
-        paths = [r["path"] for r in self.db.execute(
-            "SELECT path FROM notes WHERE student_id = ? AND audience = ? AND scope = ?",
-            (student["id"], audience, scope))]
+        rows = self.db.execute(
+            "SELECT path, summary FROM notes WHERE student_id = ? AND audience = ? AND scope = ?",
+            (student["id"], audience, scope)).fetchall()
         by_name = {}
-        for p in paths:
-            stem = p.removesuffix(".md")
-            by_name.setdefault(stem.lower(), p)
-            by_name.setdefault(stem.rsplit("/", 1)[-1].lower(), p)
+        for r in rows:
+            stem = r["path"].removesuffix(".md")
+            by_name.setdefault(stem.lower(), r["path"])
+            by_name.setdefault(stem.rsplit("/", 1)[-1].lower(), r["path"])
         base = view_url(student["id"], audience, scope)
 
         def resolve(target):
             p = by_name.get(target.strip().lower().removesuffix(".md"))
-            return f'{base}n/{"/".join(q(x) for x in p.split("/"))}' if p else None
+            return note_url(base, p) if p else None
 
-        body = (self.view_header(student, audience, scope, v)
-                + f'<p><a href="{base}">← Back to the view</a></p>'
-                + f'<article><p class="asof">{esc(path)}</p>'
-                + render_markdown(note["text"], resolve) + "</article>")
-        return page(self.cfg, path.rsplit("/", 1)[-1].removesuffix(".md"), body, person)
+        back = base + ("" if audience != "parent" or note["summary"] else "?all=1")
+        title = note_title(path, note["type"])
+        body = (self.view_header(person, student, audience, scope, v,
+                                 (back, "Back to " + ("everything" if back.endswith("all=1")
+                                                      else "the overview")))
+                + "<article>" + render_markdown(note["text"], resolve, title) + "</article>")
+        return page(self.cfg, title, body, person)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -761,17 +890,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(200, STYLE, "text/css; charset=utf-8")
         if url.path == "/signin":
             token = (query.get("t") or [""])[0]
-            body = ("<h1>Sign in</h1><p>This link works once and expires 15 minutes after "
-                    "it was sent.</p><form method=\"post\" action=\"/signin\">"
+            body = ("<h1>Welcome</h1><p>Tap the button to open your student's Locker. "
+                    "No password needed.</p><form method=\"post\" action=\"/signin\">"
                     f'<input type="hidden" name="t" value="{esc(token)}">'
-                    "<button>Sign in</button></form>")
+                    '<button class="big">Open OmaLocker</button></form>'
+                    '<p class="muted">This link works once, for 15 minutes. You stay signed in '
+                    "on this phone for 30 days.</p>")
             return self.send(200, page(v.cfg, "Sign in", body))
         person = v.session_person(self.headers.get("Cookie"))
         if url.path == "/":
             if not person:
-                body = ("<h1>OmaLocker</h1><p>Sign in with the link the school sent you. "
+                body = ("<h1>OmaLocker</h1><p>Open the sign-in link the school emailed you. "
                         "Need a new one? Ask the school office.</p>")
                 return self.send(200, page(v.cfg, "Sign in", body))
+            views = allowed_views(v.db, person)
+            if len(views) == 1:  # one child, one view: go straight there
+                s, audience, scope = views[0]
+                return self.redirect(view_url(s["id"], audience, scope))
             return self.send(200, v.home_page(person))
         if not person:
             return self.redirect("/")
@@ -831,8 +966,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not signed:
                 audit(v.db, "unknown", "sign-in", result="denied",
                       detail="used, expired or unknown link")
-                body = ("<h1>That link doesn't work</h1><p>It was already used or has expired. "
-                        "Ask the school office for a new one.</p>")
+                body = ("<h1>That link has expired</h1><p>Sign-in links work once, for 15 "
+                        "minutes. Ask the school office for a new one.</p>")
                 return self.send(400, page(v.cfg, "Sign in", body))
             session, person_id = signed
             who = v.db.execute("SELECT * FROM people WHERE id = ?", (person_id,)).fetchone()
