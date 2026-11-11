@@ -12,6 +12,7 @@ Python stdlib only. See docs/format.md for the note format.
   omalocker push [--if-set-up]
   omalocker send-levels [--if-set-up]      (teacher)
   omalocker pull-levels [--if-set-up]      (student)
+  omalocker submission NOTE | turned-in NOTE [--assignment URL]   (Omacanvas)
   omalocker graduate --to DIR
   omalocker doctor [--show-names] [--json]
 
@@ -1811,6 +1812,78 @@ def cmd_pull_levels(args):
     return 0
 
 
+# ---------------------------------------------------------------- turn in
+#
+# Omacanvas turns in writing from a file. A Locker work note is more than the writing:
+# properties, [[links]], %% comments %%, app blocks. `submission` gives Omacanvas just
+# the writing; `turned-in` records the turn-in on the note (docs/omacanvas.md).
+
+ASSIGNMENT_URL = re.compile(r"^https://[^/\s]+/courses/\d+/assignments/\d+/?$")
+EMBED_RE = re.compile(r"!\[\[[^\]]*\]\]")
+COMMENT_RE = re.compile(r"%%.*?%%", re.S)
+BLOCK_FULL_RE = re.compile(r"<!-- omalocker:([\w-]+) -->.*?<!-- /omalocker:\1 -->\n?", re.S)
+
+
+def submission_text(text):
+    """The writing in a note, as a teacher should see it."""
+    try:
+        _, body = split_note(text)
+    except FormatError:
+        body = text
+    body = COMMENT_RE.sub("", body)              # Obsidian comments: never for the teacher
+    body = BLOCK_FULL_RE.sub("", body)           # app-made blocks aren't the student's writing
+    body = EMBED_RE.sub("", body)                # embedded notes and images can't go as text
+    body = LINK_RE.sub(lambda m: (m.group(0).split("|", 1)[1][:-2] if "|" in m.group(0)
+                                  else m.group(1)).strip(), body)
+    body = re.sub(r"[ \t]+\n", "\n", body)
+    return re.sub(r"\n{3,}", "\n\n", body).strip() + "\n"
+
+
+def work_note(locker, path):
+    """(resolved path, props, body) of a work note inside the Locker, or exit."""
+    path = Path(path).expanduser().resolve()
+    if locker.resolve() not in path.parents:
+        sys.exit(f"omalocker: {path} isn't in the Locker ({locker})")
+    try:
+        props, body = read_note(path)
+    except (OSError, FormatError, UnicodeDecodeError) as e:
+        sys.exit(f"omalocker: can't read {path.name}: {e}")
+    return path, props or {}, body
+
+
+def cmd_submission(args):
+    path = Path(args.note).expanduser()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"omalocker: can't read {path}: {e}", file=sys.stderr)
+        return 1
+    out = submission_text(text)
+    if not out.strip():
+        print("omalocker: nothing to turn in: the note has no writing yet", file=sys.stderr)
+        return 1
+    sys.stdout.write(out)
+    return 0
+
+
+def cmd_turned_in(args):
+    locker = Path(args.locker or default_locker()).expanduser()
+    path, props, body = work_note(locker, args.note)
+    if props.get("type") != "work":
+        print(f"omalocker: {path.name} isn't a work note (type: {props.get('type')})", file=sys.stderr)
+        return 1
+    if args.assignment and not ASSIGNMENT_URL.match(args.assignment):
+        print("omalocker: --assignment must be a Canvas assignment link, like "
+              "https://school.instructure.com/courses/12/assignments/34", file=sys.stderr)
+        return 1
+    props["status"] = "turned-in"
+    if args.assignment:
+        props["canvas_assignment"] = args.assignment.rstrip("/")
+    result = write_if_changed(path, dump_props(props) + body)
+    print(f"{path.relative_to(locker.resolve())}: turned in" + ("" if result else " (already marked)"))
+    return 0
+
+
 # ---------------------------------------------------------------- graduate
 #
 # At graduation the student keeps their Locker and the school deletes its
@@ -2162,6 +2235,16 @@ def main(argv=None):
                    help="for the timer: do nothing on a laptop that isn't a student's, has no "
                         "viewer settings, or has graduated")
     p.set_defaults(func=cmd_pull_levels)
+
+    p = sub.add_parser("submission", help="print a note's writing as it should be turned in "
+                                         "(no properties, comments or [[link]] brackets)")
+    p.add_argument("note")
+    p.set_defaults(func=cmd_submission)
+
+    p = sub.add_parser("turned-in", help="mark a work note turned in (Omacanvas calls this)")
+    p.add_argument("note")
+    p.add_argument("--assignment", help="the Canvas assignment link")
+    p.set_defaults(func=cmd_turned_in)
 
     p = sub.add_parser("graduate", help="hand the student their Locker; stop pushing and backups")
     p.add_argument("--to", required=True, help="folder for the Locker zip (e.g. a USB drive)")

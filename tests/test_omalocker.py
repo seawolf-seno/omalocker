@@ -509,6 +509,66 @@ class PacTerminus(Env):
         self.assertIn("no date", err)
 
 
+class TurnIn(Env):
+    """Omacanvas turns in a Locker work note: only the writing goes to Canvas."""
+
+    NOTE = (
+        '---\ntype: work\nclass: "[[English 10]]"\nstatus: draft\nshare:\n  - teacher\n---\n'
+        "# Personal essay\n\n"
+        "Running taught me [[Argument from evidence|to back up a claim]], and [[Ms. Lindqvist]]\n"
+        "says the [[Personal essay#Ending|ending]] works.   \n\n"
+        "%% note to self: cut the second paragraph? %%\n"
+        "![[race photo.png]]\n\n\n"
+        "<!-- omalocker:canvas -->\nDue Nov 21. Rubric: ...\n<!-- /omalocker:canvas -->\n"
+        "The last mile is quiet.\n")
+
+    def setUp(self):
+        super().setUp()
+        self.run_cli("init", "--role", "student")
+        self.path = self.locker / "Work" / "English 10" / "Personal essay.md"
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text(self.NOTE)
+
+    def test_submission_is_only_the_writing(self):
+        code, out, _ = self.run_cli("submission", str(self.path))
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "# Personal essay\n\n"
+                              "Running taught me to back up a claim, and Ms. Lindqvist\n"
+                              "says the ending works.\n\n"
+                              "The last mile is quiet.\n")
+        for leaked in ("type: work", "share", "[[", "note to self", "race photo", "Rubric"):
+            self.assertNotIn(leaked, out)
+
+    def test_empty_note_has_nothing_to_turn_in(self):
+        self.path.write_text("---\ntype: work\n---\n%% just ideas %%\n")
+        code, _, err = self.run_cli("submission", str(self.path))
+        self.assertEqual(code, 1)
+        self.assertIn("nothing to turn in", err)
+
+    def test_turned_in_marks_the_note_and_keeps_the_writing(self):
+        url = "https://pacifica.instructure.com/courses/12/assignments/34"
+        code, out, err = self.run_cli("turned-in", str(self.path), "--assignment", url)
+        self.assertEqual(code, 0, err)
+        props, body = om.read_note(self.path)
+        self.assertEqual((props["status"], props["canvas_assignment"]), ("turned-in", url))
+        self.assertEqual(props["share"], ["teacher"])
+        self.assertEqual(body, om.split_note(self.NOTE)[1])
+        self.assertIn("already marked", self.run_cli("turned-in", str(self.path), "--assignment", url)[1])
+
+    def test_turned_in_refuses_what_it_should(self):
+        code, _, err = self.run_cli("turned-in", str(self.path), "--assignment", "https://evil.example/x")
+        self.assertEqual(code, 1)
+        self.assertIn("Canvas assignment link", err)
+        outside = self.tmp / "essay.md"
+        outside.write_text(self.NOTE)
+        with self.assertRaises(SystemExit) as e:
+            self.run_cli("turned-in", str(outside))
+        self.assertIn("isn't in the Locker", str(e.exception))
+        code, _, err = self.run_cli("turned-in", str(self.locker / "Me.md"))
+        self.assertEqual(code, 1)
+        self.assertIn("isn't a work note", err)
+
+
 class Doctor(Env):
     def setUp(self):
         super().setUp()

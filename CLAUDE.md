@@ -79,6 +79,9 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
 - 2026-11-10: PacTerminus -> milestone: `omalocker import pacterminus` reads the game's
   marker (~/.local/share/omaterminus/complete, ISO time) -> Pathway/Milestones/<date> Finished
   PacTerminus.md, once; run by the hourly sync before push. No change to PacTerminus.
+- 2026-11-10: Omacanvas turn-in (Omawrite = Omacanvas turn-in, seno): `omalocker submission`
+  (just the writing: no frontmatter/comments/blocks/link brackets) and `turned-in` (status +
+  canvas_assignment). Omacanvas changes listed in docs/omacanvas.md, not made (other repo).
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
   `docs/plan.md` (backup key, where the viewer runs, parent sign-in, custody records);
