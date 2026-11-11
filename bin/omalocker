@@ -4,7 +4,7 @@
 Python stdlib only. See docs/format.md for the note format.
 
   omalocker init [--role ROLE] [--move-classes]
-  omalocker import classes
+  omalocker import classes | pacterminus
   omalocker mastery
   omalocker backup [--if-due | --status]
   omalocker restore [--to DIR] [--snapshot ID]
@@ -401,8 +401,67 @@ def upsert(path, owned, block, title, tail=""):
     return write_if_changed(path, dump_props(props) + body)
 
 
+def pacterminus_marker():
+    """Where PacTerminus (omaterminus.py) writes its completion marker: one line, the
+    local time the student finished, in ISO 8601."""
+    if os.environ.get("OMALOCKER_PACTERMINUS_MARKER"):
+        return Path(os.environ["OMALOCKER_PACTERMINUS_MARKER"])
+    data_home = Path(os.environ.get("XDG_DATA_HOME") or home() / ".local" / "share")
+    return data_home / "omaterminus" / "complete"
+
+
+def import_pacterminus(locker):
+    """Finishing PacTerminus becomes a milestone: Pathway/Milestones/<date> Finished
+    PacTerminus.md. Once: later runs only keep its own properties and block current."""
+    marker = pacterminus_marker()
+    try:
+        stamp = marker.read_text(encoding="utf-8").strip().splitlines()[0]
+    except (FileNotFoundError, IndexError):
+        print("PacTerminus: not finished yet; nothing to import")
+        return 0
+    except OSError as e:
+        print(f"omalocker: can't read the PacTerminus marker: {e}", file=sys.stderr)
+        return 1
+    try:
+        day = datetime.datetime.fromisoformat(stamp).date().isoformat()
+    except ValueError:
+        m = re.match(r"\d{4}-\d{2}-\d{2}", stamp)
+        if not m:
+            print(f"omalocker: the PacTerminus marker has no date: {stamp[:40]!r}", file=sys.stderr)
+            return 1
+        day = m.group(0)
+    folder = locker / "Pathway" / "Milestones"
+    existing = None
+    for path in sorted(folder.glob("*.md")) if folder.is_dir() else []:
+        try:
+            props, _ = read_note(path)
+        except (FormatError, UnicodeDecodeError):
+            continue
+        if (props or {}).get("type") == "milestone" and props.get("source") == "pacterminus":
+            existing = path
+            break
+    path = existing or folder / f"{day} Finished PacTerminus.md"
+    if path.exists():
+        props, body = read_note(path)
+        props = props or {}
+    else:
+        props, body = {}, "# Finished PacTerminus\n"
+    props.update({"type": "milestone", "date": day, "source": "pacterminus",
+                  "evidence": "completion marker"})
+    body = set_block(body, "pacterminus", "Completed every quest in PacTerminus.")
+    result = write_if_changed(path, dump_props(props) + body)
+    rel = path.relative_to(locker)
+    print(f"PacTerminus: finished {day}; {rel} {result or 'already up to date'}")
+    return 0
+
+
 def cmd_import(args):
     locker = Path(args.locker or default_locker()).expanduser()
+    if args.what == "pacterminus":
+        if not (locker / "Home.md").exists():
+            print(f"omalocker: no Locker at {locker}; run `omalocker init` first", file=sys.stderr)
+            return 1
+        return import_pacterminus(locker)
     classes_dir = Path(args.classes or home() / "Classes").expanduser()
     if not (locker / "Home.md").exists():
         print(f"omalocker: no Locker at {locker}; run `omalocker init` first", file=sys.stderr)
@@ -2059,7 +2118,9 @@ def main(argv=None):
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("import", help="bring notes in from another app")
-    p.add_argument("what", choices=["classes"])
+    p.add_argument("what", choices=["classes", "pacterminus"],
+                   help="classes: OmaMastery classes and ideas; pacterminus: finishing the game "
+                        "becomes a milestone")
     p.add_argument("--classes", help="OmaMastery folder (default ~/Classes)")
     p.set_defaults(func=cmd_import)
 

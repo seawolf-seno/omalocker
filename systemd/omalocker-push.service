@@ -1,5 +1,5 @@
 [Unit]
-Description=Sync with the OmaLocker viewer: pull levels, send views (students); send levels (teachers)
+Description=Sync with the OmaLocker viewer: pull levels, PacTerminus milestone, send views (students); send levels (teachers)
 Documentation=https://github.com/seawolf-seno/omalocker/blob/main/docs/viewer.md
 ConditionPathExists=%h/Locker/Me.md
 
@@ -9,6 +9,8 @@ Type=oneshot
 # settings, the wrong kind of Locker, or after graduation. A failed pull ("-")
 # doesn't stop the push.
 ExecStart=-/usr/bin/omalocker pull-levels --if-set-up
+# Finishing PacTerminus (~/.local/share/omaterminus/complete) becomes a milestone.
+ExecStart=-/usr/bin/omalocker import pacterminus
 ExecStart=/usr/bin/omalocker push --if-set-up
 ExecStart=/usr/bin/omalocker send-levels --if-set-up
 Nice=10

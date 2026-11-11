@@ -76,6 +76,9 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
 - 2026-11-10: Graphify experiment (experiments/graphify, fictional syllabi, claude-cli backend):
   found 4/4 planted joints (3 as hyperedges), 0 false; watch boilerplate links. Next: real
   syllabi on seno's machine, teachers judge (results.md).
+- 2026-11-10: PacTerminus -> milestone: `omalocker import pacterminus` reads the game's
+  marker (~/.local/share/omaterminus/complete, ISO time) -> Pathway/Milestones/<date> Finished
+  PacTerminus.md, once; run by the hourly sync before push. No change to PacTerminus.
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
   `docs/plan.md` (backup key, where the viewer runs, parent sign-in, custody records);

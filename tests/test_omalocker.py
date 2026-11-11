@@ -457,6 +457,58 @@ class BackupWithRestic(Backup):
         self.assertIn("can't open the backup repository", err)
 
 
+class PacTerminus(Env):
+    """Finishing PacTerminus writes ~/.local/share/omaterminus/complete (one ISO line)."""
+
+    def setUp(self):
+        super().setUp()
+        self.run_cli("init", "--role", "student")
+        self.marker = self.tmp / ".local" / "share" / "omaterminus" / "complete"
+        self.note_path = self.locker / "Pathway" / "Milestones" / "2026-10-02 Finished PacTerminus.md"
+
+    def finish(self, stamp="2026-10-02T14:03:11.123456-07\n"):
+        self.marker.parent.mkdir(parents=True, exist_ok=True)
+        self.marker.write_text(stamp)
+
+    def test_nothing_until_the_game_is_finished(self):
+        code, out, _ = self.run_cli("import", "pacterminus")
+        self.assertEqual(code, 0)
+        self.assertIn("not finished yet", out)
+        self.assertFalse(list((self.locker / "Pathway").rglob("*.md")))
+
+    def test_finishing_becomes_one_milestone(self):
+        self.finish()
+        code, out, err = self.run_cli("import", "pacterminus")
+        self.assertEqual(code, 0, err)
+        self.assertIn("created", out)
+        props, body = om.read_note(self.note_path)
+        self.assertEqual(props, {"type": "milestone", "date": "2026-10-02",
+                                 "source": "pacterminus", "evidence": "completion marker"})
+        self.assertIn("Completed every quest in PacTerminus.", body)
+        # The student adds their own words; later runs keep them and add nothing.
+        self.note_path.write_text(self.note_path.read_text() + "\nThe ghost level took me three days.\n")
+        code, out, _ = self.run_cli("import", "pacterminus")
+        self.assertIn("already up to date", out)
+        self.assertIn("three days", self.note_path.read_text())
+        self.assertEqual(len(list((self.locker / "Pathway" / "Milestones").glob("*.md"))), 1)
+        code, issues = Doctor.doctor(self)
+        self.assertEqual(code, 0, issues)
+
+    def test_milestone_is_on_the_parents_first_page(self):
+        self.finish("2026-10-02T09:00:00Z\n")
+        self.run_cli("import", "pacterminus")
+        self.run_cli("views")
+        out = self.tmp / ".local" / "state" / "omalocker" / "views"
+        notes = {n["path"]: n for n in json.loads((out / "parent" / "view.json").read_text())["notes"]}
+        self.assertTrue(notes["Pathway/Milestones/2026-10-02 Finished PacTerminus.md"]["summary"])
+
+    def test_a_garbled_marker_is_an_error(self):
+        self.finish("finished!\n")
+        code, _, err = self.run_cli("import", "pacterminus")
+        self.assertEqual(code, 1)
+        self.assertIn("no date", err)
+
+
 class Doctor(Env):
     def setUp(self):
         super().setUp()

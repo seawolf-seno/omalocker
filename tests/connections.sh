@@ -65,6 +65,13 @@ step "omalocker doctor on the Phase 0 sample Locker"
 step "Student: views per audience from a copy of the sample Locker"
 student="$HOME/student-locker"
 cp -r "$repo/fixtures/sample-locker" "$student"
+rm "$student/Pathway/Milestones/2026-10-02 Finished PacTerminus.md"
+# PacTerminus writes this when the game is finished (omaterminus.py).
+mkdir -p "$HOME/.local/share/omaterminus"
+printf '2026-10-02T14:03:11.123456-07\n' > "$HOME/.local/share/omaterminus/complete"
+"$omalocker" --locker "$student" import pacterminus | grep -q "created"
+"$omalocker" --locker "$student" import pacterminus | grep -q "already up to date"
+test -f "$student/Pathway/Milestones/2026-10-02 Finished PacTerminus.md"
 "$omalocker" --locker "$student" views
 views="$HOME/.local/state/omalocker/views"
 for v in parent advisor "teacher/Biology" "activity/Cross Country"; do

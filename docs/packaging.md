@@ -20,7 +20,7 @@ settings exist, so installing the package alone changes nothing for anyone.
 |---|---|---|
 | `omalocker-setup.service` | each login, only while `~/Locker` doesn't exist | `omalocker init`, with the role from `/etc/omalocker/omalocker.toml` |
 | `omalocker-backup.timer` | hourly | `omalocker backup --if-due`: an encrypted backup every 2 days (`docs/backup.md`) |
-| `omalocker-push.timer` | hourly | sync with the viewer: `pull-levels` and `push` on a student's laptop, `send-levels` on a teacher's; each step does nothing where it doesn't apply, without viewer settings, or after graduation |
+| `omalocker-push.timer` | hourly | sync with the viewer: `pull-levels`, `import pacterminus` (finishing PacTerminus becomes a milestone) and `push` on a student's laptop, `send-levels` on a teacher's; each step does nothing where it doesn't apply, without viewer settings, or after graduation |
 
 ## What pacos has to put on each laptop
 
