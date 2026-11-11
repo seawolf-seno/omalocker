@@ -1,0 +1,5 @@
+# Only the viewer goes to Vercel. Fixtures, tests, the template and the device CLI stay here.
+/*
+!/api
+!/viewer
+!/vercel.json

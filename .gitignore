@@ -3,3 +3,4 @@ __pycache__/
 build/
 *.pkg.tar.zst
 .obsidian/workspace*.json
+.vercel/

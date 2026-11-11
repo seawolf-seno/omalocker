@@ -51,6 +51,9 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
   first (decisions 9–11). Parent view reworked for phones (cards, plain titles, levels on the
   overview, one child = straight in, 30-day sessions). Demo for his wife:
   https://claude.ai/artifact/A7hdqunn4MX26qXwHgMUa9 (fictional; built from real pages).
+- 2026-11-10: viewer ready for Vercel + Turso (seno chose Turso): stdlib Turso HTTP client,
+  settings in the DB, `api/index.py` + `vercel.json` + `.vercelignore`; tests run local and
+  through `tests/fake_turso.py`. Vercel CLI/plugin/MCP set up (account srsuchard). Not deployed.
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
   `docs/plan.md` (backup key, where the viewer runs, parent sign-in, custody records);

@@ -25,16 +25,39 @@ Still open (see `docs/plan.md`, decisions still open 3–5):
   `docs/graduation.md`.
 - Not built yet: the teacher → student levels flow, attachments, rate limits.
 
-## Moving to Vercel (decided 2026-11-10, not built)
+## On Vercel with Turso (decided 2026-11-10; code ready, not deployed)
 
-Vercel runs Python as functions, not a long-running server, and has no lasting disk. So:
-- **Code:** the handler maps onto Vercel's Python runtime (an `api/` function with a
-  `BaseHTTPRequestHandler` class); the admin CLI stays a local tool that talks to the database.
-- **Database:** SQLite on disk won't survive. Options: Vercel's Postgres (Neon) or Turso
-  (libSQL, close to SQLite). Either holds student data at a third party.
-- **Email:** sign-in links need a mail service (for example Resend or Postmark).
-- **Contracts:** Vercel, the database host and the mail service each need a data processing
-  agreement before real student data goes there (FERPA "school official" terms).
+- **Code:** `api/index.py` loads `viewer/omalocker-viewer` and hands Vercel its `handler`
+  class (Vercel's Python runtime takes a `BaseHTTPRequestHandler`). `vercel.json` sends every
+  path to it; `.vercelignore` uploads only `api/`, `viewer/` and `vercel.json`.
+- **Database:** Turso (libSQL, SQLite's dialect), spoken over its HTTP API with the
+  standard library, so the viewer still has no dependencies. Locally the same code uses a
+  SQLite file. Pick with `--db libsql://...` (token in `TURSO_AUTH_TOKEN` or a file named by
+  `OMALOCKER_VIEWER_DB_TOKEN_FILE`), or `--data DIR` for a local file. On Vercel:
+  `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` (the names Turso's Vercel integration sets).
+- **Settings** (`env`, `base_url`, `timezone`) are stored in the database by `init`, so the
+  Vercel function and the admin CLI on your laptop read the same ones. Run `init` again after
+  an upgrade: it adds missing tables and leaves settings alone.
+- **Tests:** every viewer test runs twice, on a SQLite file and through a fake Turso server
+  (`tests/fake_turso.py`), and `api/index.py` is loaded the way Vercel loads it.
+- **Limits:** a Vercel function takes at most 4.5 MB per request, so a very large Locker's
+  push will need splitting later.
+- **Deleted data:** locally, graduation overwrites deleted rows (`secure_delete`, `VACUUM`).
+  Turso keeps point-in-time backups, so deleted rows stay in its backups until they age out;
+  check Turso's retention with IT before real data.
+- **Still to do:** a mail service for sign-in links (for example Resend); data processing
+  agreements with Vercel, Turso and the mail service before any real student data.
+
+### Set up staging
+
+```sh
+# 1. Turso database (through Vercel's Marketplace, or the Turso CLI); then locally:
+export TURSO_AUTH_TOKEN=...            # never commit it
+omalocker-viewer --db libsql://<db>.turso.io init --env staging --base-url https://<project>.vercel.app
+# 2. Vercel: set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN on the project, then deploy
+vercel deploy
+# 3. Fictional people, grants and a push token, as below, with --db instead of --data
+```
 
 ## Who sees what
 
@@ -89,7 +112,7 @@ separate data folders on separate machines.
 ## Set up (staging)
 
 ```sh
-export OMALOCKER_VIEWER_DATA=/var/lib/omalocker-viewer   # the default
+export OMALOCKER_VIEWER_DATA=/var/lib/omalocker-viewer   # a local file; or --db for Turso
 omalocker-viewer init --env staging --base-url https://locker-staging.school.example
 omalocker-viewer person add --name "Rowan Teague" --email rowan@student.example.org --student --grad-year 2029
 omalocker-viewer person add --name "Parent One" --email parent1@example.org

@@ -31,7 +31,7 @@ import sqlite3
 import sys
 import threading
 import time
-import tomllib
+import urllib.error
 import urllib.parse
 from http import HTTPStatus
 from pathlib import Path
@@ -52,6 +52,10 @@ COOKIE = "olv_session"
 clock = time.time  # tests replace this
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS people (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
@@ -134,7 +138,7 @@ def digest(token):
 def audit(db, actor, action, student_id=None, audience="", scope="", path="",
           result="ok", detail=""):
     """Append one access-log entry. actor: a people row, or a label like 'device'."""
-    if isinstance(actor, sqlite3.Row):
+    if hasattr(actor, "keys"):
         actor_id, label = actor["id"], actor["email"]
     else:
         actor_id, label = None, str(actor)
@@ -153,32 +157,206 @@ def cli_actor():
 
 
 # ---------------------------------------------------------------- storage
+#
+# Two backends with one interface (the parts of sqlite3 this file uses):
+# a local SQLite file, or Turso (libSQL) over its HTTP API, for Vercel, where
+# there is no lasting disk. Settings live in the database, so the Vercel
+# function and the admin CLI read the same ones.
+
+class Row:
+    """A result row: row["name"] or row[0], like sqlite3.Row."""
+    __slots__ = ("_cols", "_values")
+
+    def __init__(self, cols, values):
+        self._cols, self._values = cols, values
+
+    def __getitem__(self, key):
+        return self._values[key] if isinstance(key, int) else self._values[self._cols.index(key)]
+
+    def keys(self):
+        return list(self._cols)
+
+    def __len__(self):
+        return len(self._values)
+
+
+class TursoCursor:
+    def __init__(self, result):
+        cols = [c.get("name") for c in result.get("cols", [])]
+        self._rows = [Row(cols, [turso_value(v) for v in r]) for r in result.get("rows", [])]
+        self.rowcount = result.get("affected_row_count", 0)
+        rowid = result.get("last_insert_rowid")
+        self.lastrowid = int(rowid) if rowid is not None else None
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
+def turso_arg(v):
+    if v is None:
+        return {"type": "null"}
+    if isinstance(v, (bool, int)):
+        return {"type": "integer", "value": str(int(v))}
+    if isinstance(v, float):
+        return {"type": "float", "value": v}
+    if isinstance(v, bytes):
+        import base64
+        return {"type": "blob", "base64": base64.b64encode(v).decode()}
+    return {"type": "text", "value": str(v)}
+
+
+def turso_value(v):
+    kind = v.get("type")
+    if kind == "integer":
+        return int(v["value"])
+    if kind == "float":
+        return float(v["value"])
+    if kind == "text":
+        return v["value"]
+    if kind == "blob":
+        import base64
+        return base64.b64decode(v.get("base64", ""))
+    return None
+
+
+class TursoConnection:
+    """One Turso stream (an HTTP 'baton'), so BEGIN ... COMMIT spans requests."""
+    remote = True
+
+    def __init__(self, url, token):
+        url = url.strip()
+        if url.startswith("libsql://"):
+            url = "https://" + url[len("libsql://"):]
+        parts = urllib.parse.urlsplit(url)
+        local = parts.hostname in ("127.0.0.1", "localhost", "::1")
+        if parts.scheme != "https" and not local:
+            raise ViewerError("the database URL must be libsql:// or https://")
+        self.url, self.token, self.baton = url.rstrip("/"), token, None
+
+    def _pipeline(self, requests):
+        import urllib.request
+        body = json.dumps({"baton": self.baton, "requests": requests}).encode()
+        req = urllib.request.Request(self.url + "/v2/pipeline", data=body, method="POST",
+                                     headers={"Authorization": f"Bearer {self.token}",
+                                              "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                out = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            with e:
+                raise sqlite3.OperationalError(f"database said {e.code}: {e.read()[:200]!r}")
+        except urllib.error.URLError as e:
+            raise sqlite3.OperationalError(f"can't reach the database: {e.reason}")
+        self.baton = out.get("baton")
+        if out.get("base_url"):
+            self.url = out["base_url"].rstrip("/")
+        results = []
+        for r in out.get("results", []):
+            if r.get("type") == "error":
+                msg = r.get("error", {}).get("message", "database error")
+                cls = sqlite3.IntegrityError if "constraint" in msg.lower() else sqlite3.OperationalError
+                raise cls(msg)
+            results.append(r.get("response", {}))
+        return results
+
+    def execute(self, sql, params=()):
+        stmt = {"sql": sql, "args": [turso_arg(v) for v in params]}
+        res = self._pipeline([{"type": "execute", "stmt": stmt}])
+        return TursoCursor(res[0].get("result", {}))
+
+    def executemany(self, sql, seq):
+        reqs = [{"type": "execute", "stmt": {"sql": sql, "args": [turso_arg(v) for v in row]}}
+                for row in seq]
+        for i in range(0, len(reqs), 200):  # one HTTP call per 200 rows
+            self._pipeline(reqs[i:i + 200])
+
+    def executescript(self, script):
+        self._pipeline([{"type": "sequence", "sql": script}])
+
+    def close(self):
+        if self.baton:
+            try:
+                self._pipeline([{"type": "close"}])
+            except sqlite3.Error:
+                pass
+            self.baton = None
+
 
 def data_dir(arg=None):
     return Path(arg or os.environ.get("OMALOCKER_VIEWER_DATA") or "/var/lib/omalocker-viewer")
 
 
-def load_config(data):
-    path = data / "config.toml"
-    if not path.exists():
-        raise ViewerError(f"no {path}: run `omalocker-viewer init` first")
-    with open(path, "rb") as f:
-        cfg = tomllib.load(f)
-    if cfg.get("env") not in ("staging", "production"):
-        raise ViewerError(f"{path}: env must be staging or production")
-    cfg.setdefault("secure_cookies", True)
-    cfg["base_url"] = str(cfg.get("base_url", "")).rstrip("/")
-    return cfg
+def db_target(data=None, db=None):
+    """Where the database is: a Turso URL (str) or a local data folder (Path)."""
+    url = db or (None if data else (os.environ.get("OMALOCKER_VIEWER_DB")
+                                    or os.environ.get("TURSO_DATABASE_URL")))
+    return url if url else data_dir(data)
 
 
-def connect(data):
-    db = sqlite3.connect(data / "viewer.db", isolation_level=None, timeout=10)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA foreign_keys = ON")
-    db.execute("PRAGMA journal_mode = WAL")
-    db.execute("PRAGMA secure_delete = ON")  # deleted student data is overwritten
-    db.executescript(SCHEMA)
+def turso_token():
+    if os.environ.get("TURSO_AUTH_TOKEN"):
+        return os.environ["TURSO_AUTH_TOKEN"].strip()
+    path = os.environ.get("OMALOCKER_VIEWER_DB_TOKEN_FILE")
+    if path:
+        return Path(path).expanduser().read_text().strip()
+    raise ViewerError("set TURSO_AUTH_TOKEN or OMALOCKER_VIEWER_DB_TOKEN_FILE for the database")
+
+
+class LocalConnection:
+    """A local sqlite3 connection, with the same .remote flag as TursoConnection."""
+    remote = False
+
+    def __init__(self, path):
+        self._db = sqlite3.connect(path, isolation_level=None, timeout=10)
+        self._db.row_factory = sqlite3.Row
+        self._db.execute("PRAGMA foreign_keys = ON")
+        self._db.execute("PRAGMA journal_mode = WAL")
+        self._db.execute("PRAGMA secure_delete = ON")  # deleted student data is overwritten
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+
+def connect(target, schema=None):
+    """target: a Turso URL (str) or a local data folder (Path). schema: create missing
+    tables. Locally that's cheap and done unless schema=False; on Turso every statement
+    is a network call, so only when asked (`omalocker-viewer init`)."""
+    if isinstance(target, str):
+        db = TursoConnection(target, turso_token())
+        try:
+            db.execute("PRAGMA foreign_keys = ON")
+        except sqlite3.Error:
+            pass
+        if schema:
+            db.executescript(SCHEMA)
+        return db
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+    db = LocalConnection(target / "viewer.db")
+    if schema is not False:
+        db.executescript(SCHEMA)
     return db
+
+
+def load_config(db):
+    try:
+        rows = db.execute("SELECT key, value FROM settings").fetchall()
+    except sqlite3.OperationalError as e:
+        if "no such table" not in str(e):
+            raise ViewerError(f"database: {e}")
+        rows = []
+    cfg = {r["key"]: r["value"] for r in rows}
+    if cfg.get("env") not in ("staging", "production"):
+        raise ViewerError("this viewer isn't set up: run `omalocker-viewer init` first")
+    cfg["base_url"] = str(cfg.get("base_url", "")).rstrip("/")
+    cfg["secure_cookies"] = cfg["base_url"].startswith("https://")
+    cfg.setdefault("timezone", "America/Los_Angeles")
+    return cfg
 
 
 def check_email(cfg, email):
@@ -320,6 +498,7 @@ def accept_push(db, student_id, payload):
     pushed = clock()
     db.execute("BEGIN IMMEDIATE")
     try:
+        db.execute("DELETE FROM notes WHERE student_id = ?", (student_id,))
         db.execute("DELETE FROM views WHERE student_id = ?", (student_id,))
         for audience, scope, as_of, notes in rows:
             db.execute("INSERT INTO views VALUES (?, ?, ?, ?, ?)",
@@ -638,17 +817,16 @@ def page(cfg, title, body, person=None):
 
 
 class Viewer:
-    def __init__(self, data):
-        self.data = data
-        self.cfg = load_config(data)
+    def __init__(self, target):
+        self.target = target
         self._local = threading.local()
-        connect(data).close()
+        self.cfg = load_config(self.db)
 
     @property
     def db(self):
         # One connection per server thread: transactions don't mix.
         if getattr(self._local, "db", None) is None:
-            self._local.db = connect(self.data)
+            self._local.db = connect(self.target, schema=False)
         return self._local.db
 
     def close_thread_db(self):
@@ -982,29 +1160,43 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.not_found()
 
 
-def make_server(data, host, port):
-    viewer = Viewer(data)
+def make_server(target, host, port):
+    viewer = Viewer(target)
     handler = type("BoundHandler", (Handler,), {"viewer": viewer})
     server = http.server.ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True
     return server
 
 
+def vercel_handler():
+    """The request handler class for Vercel's Python runtime (api/index.py).
+    Settings and data come from Turso: TURSO_DATABASE_URL and TURSO_AUTH_TOKEN."""
+    target = os.environ.get("OMALOCKER_VIEWER_DB") or os.environ.get("TURSO_DATABASE_URL")
+    if not target:
+        raise ViewerError("set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN")
+    return type("handler", (Handler,), {"viewer": Viewer(target)})
+
+
 # ---------------------------------------------------------------- admin CLI
 
 def cmd_init(args):
-    data = data_dir(args.data)
-    data.mkdir(parents=True, exist_ok=True, mode=0o700)
-    cfg_path = data / "config.toml"
-    if cfg_path.exists():
-        print(f"already set up: {cfg_path}")
-    else:
-        if not args.base_url.startswith("https://") and args.env == "production":
-            raise ViewerError("production needs an https:// base URL")
-        cfg_path.write_text(f'env = "{args.env}"\nbase_url = "{args.base_url}"\n'
-                            f"secure_cookies = {'true' if args.base_url.startswith('https://') else 'false'}\n")
-        print(f"set up {args.env} viewer in {data}")
-    connect(data).close()
+    target = db_target(args.data, args.db)
+    db = connect(target, schema=True)
+    _admin_dbs.append(db)
+    where = target if isinstance(target, str) else target / "viewer.db"
+    existing = {r["key"]: r["value"] for r in db.execute("SELECT key, value FROM settings")}
+    if existing.get("env"):
+        print(f"already set up ({existing['env']}): {where}; tables brought up to date")
+        return 0
+    if not args.env or not args.base_url:
+        raise ViewerError("a new viewer needs --env and --base-url")
+    base = args.base_url.rstrip("/")
+    if args.env == "production" and not base.startswith("https://"):
+        raise ViewerError("production needs an https:// base URL")
+    db.executemany("INSERT INTO settings VALUES (?, ?)",
+                   [("env", args.env), ("base_url", base), ("timezone", args.timezone)])
+    audit(db, cli_actor(), "init", detail=f"{args.env} {base}")
+    print(f"set up {args.env} viewer: {where}")
     return 0
 
 
@@ -1012,11 +1204,9 @@ _admin_dbs = []
 
 
 def open_admin(args):
-    data = data_dir(args.data)
-    cfg = load_config(data)
-    db = connect(data)
+    db = connect(db_target(args.data, args.db), schema=False)
     _admin_dbs.append(db)
-    return cfg, db
+    return load_config(db), db
 
 
 def cmd_person(args):
@@ -1143,16 +1333,21 @@ def cmd_graduate(args):
                    [*emails, *[e + " %" for e in emails]])
         audit(db, cli_actor(), "graduate", detail=f"student #{student['id']}: views, logins, "
               f"records and {logged} access-log entries deleted")
-        for f in plan["family"]:
-            db.execute("DELETE FROM people WHERE id = ?", (f["id"],))
-        # Cascades: grants, views, notes, push token, sign-in links, sessions.
-        db.execute("DELETE FROM people WHERE id = ?", (student["id"],))
+        sid = student["id"]
+        for table in ("notes", "views", "push_tokens"):
+            db.execute(f"DELETE FROM {table} WHERE student_id = ?", (sid,))
+        db.execute(f"DELETE FROM grants WHERE student_id = ? OR person_id IN ({marks})",
+                   (sid, *gone))
+        for table in ("sign_in", "sessions"):
+            db.execute(f"DELETE FROM {table} WHERE person_id IN ({marks})", gone)
+        db.execute(f"DELETE FROM people WHERE id IN ({marks})", gone)
         db.execute("COMMIT")
     except BaseException:
         db.execute("ROLLBACK")
         raise
-    db.execute("VACUUM")  # deleted rows shouldn't linger in the file
-    db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    if not db.remote:
+        db.execute("VACUUM")  # deleted rows shouldn't linger in the file
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     print("Deleted.")
     return 0
 
@@ -1223,8 +1418,7 @@ def cmd_list(args):
 
 
 def cmd_serve(args):
-    data = data_dir(args.data)
-    server = make_server(data, args.host, args.port)
+    server = make_server(db_target(args.data, args.db), args.host, args.port)
     cfg = server.RequestHandlerClass.viewer.cfg
     print(f"omalocker-viewer ({cfg['env']}) on http://{args.host}:{server.server_address[1]}",
           file=sys.stderr)
@@ -1238,12 +1432,15 @@ def cmd_serve(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="omalocker-viewer", description=__doc__.split("\n")[0])
     parser.add_argument("--version", action="version", version=f"omalocker-viewer {VERSION}")
-    parser.add_argument("--data", help="data folder (default /var/lib/omalocker-viewer)")
+    parser.add_argument("--data", help="local data folder (default /var/lib/omalocker-viewer)")
+    parser.add_argument("--db", help="Turso database URL (libsql://...; token in TURSO_AUTH_TOKEN). "
+                                     "Default: OMALOCKER_VIEWER_DB or TURSO_DATABASE_URL, else --data")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("init", help="set up a viewer's data folder")
-    p.add_argument("--env", choices=["staging", "production"], required=True)
-    p.add_argument("--base-url", required=True, help="the address people open")
+    p.add_argument("--env", choices=["staging", "production"])
+    p.add_argument("--base-url", help="the address people open")
+    p.add_argument("--timezone", default="America/Los_Angeles", help="how times are shown")
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("person", help="add a person")
@@ -1301,6 +1498,9 @@ def main(argv=None):
         return args.func(args)
     except ViewerError as e:
         print(f"omalocker-viewer: {e}", file=sys.stderr)
+        return 1
+    except sqlite3.Error as e:
+        print(f"omalocker-viewer: database: {e}", file=sys.stderr)
         return 1
     finally:
         while _admin_dbs:

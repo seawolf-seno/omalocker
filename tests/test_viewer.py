@@ -29,6 +29,7 @@ def load(name, path):
 
 
 vw = load("omalocker_viewer", REPO / "viewer" / "omalocker-viewer")
+fake_turso = load("fake_turso", REPO / "tests" / "fake_turso.py")
 om = load("omalocker_cli", REPO / "bin" / "omalocker")
 
 STUDENT = "rowan@student.example.org"
@@ -49,17 +50,27 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Viewer(unittest.TestCase):
+    """On a local SQLite file. ViewerOnTurso runs the same tests through the Turso client."""
+    REMOTE = False
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.saved = {k: os.environ.pop(k) for k in list(os.environ)
-                      if k.startswith(("XDG_", "OMALOCKER_"))}
+                      if k.startswith(("XDG_", "OMALOCKER_", "TURSO_"))}
         self.old_home = os.environ.get("HOME")
         os.environ["HOME"] = str(self.tmp)
         os.environ["OMALOCKER_VIEWER_QUIET"] = "1"
         os.environ["OMALOCKER_BACKUP_CONFIG"] = str(self.tmp / "backup.toml")
         self.data = self.tmp / "viewer"
+        self.fake = None
+        if self.REMOTE:
+            os.environ["TURSO_AUTH_TOKEN"] = "fake-turso-token"
+            self.fake = fake_turso.FakeTurso(str(self.tmp / "turso.db"), "fake-turso-token")
+            self.target, self.db_args = self.fake.url, ["--db", self.fake.url]
+        else:
+            self.target, self.db_args = self.data, ["--data", str(self.data)]
         self.admin("init", "--env", "staging", "--base-url", "http://127.0.0.1")
-        self.server = vw.make_server(self.data, "127.0.0.1", 0)
+        self.server = vw.make_server(self.target, "127.0.0.1", 0)
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, args=(0.05,), daemon=True).start()
 
@@ -90,8 +101,10 @@ class Viewer(unittest.TestCase):
     def tearDown(self):
         self.server.shutdown()
         self.server.server_close()
+        if self.fake:
+            self.fake.close()
         shutil.rmtree(self.tmp)
-        for k in [k for k in os.environ if k.startswith(("XDG_", "OMALOCKER_"))]:
+        for k in [k for k in os.environ if k.startswith(("XDG_", "OMALOCKER_", "TURSO_"))]:
             del os.environ[k]
         os.environ.update(self.saved)
         if self.old_home is not None:
@@ -101,7 +114,7 @@ class Viewer(unittest.TestCase):
     def admin(self, *argv, ok=True):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = vw.main(["--data", str(self.data), *argv])
+            code = vw.main([*self.db_args, *argv])
         if ok:
             self.assertEqual(code, 0, err.getvalue())
         return out.getvalue() if ok else (code, err.getvalue())
@@ -329,7 +342,7 @@ class Viewer(unittest.TestCase):
 
         out = self.admin("graduate", STUDENT, "--yes")
         self.assertIn("Deleted.", out)
-        db = vw.connect(self.data)
+        db = vw.connect(self.target)
         try:
             emails = {r["email"] for r in db.execute("SELECT email FROM people")}
             for table in ("views", "notes", "grants", "push_tokens"):
@@ -345,9 +358,10 @@ class Viewer(unittest.TestCase):
         code, _, err = self.push()                          # old push token is dead
         self.assertEqual(code, 1)
         self.assertIn("401", err)
-        raw = (self.data / "viewer.db").read_bytes()
-        self.assertNotIn(b"Rowan Teague", raw)
-        self.assertNotIn(b"yeast respiration", raw)
+        if not self.REMOTE:  # Turso: see docs/viewer.md on deleted data and backups
+            raw = (self.data / "viewer.db").read_bytes()
+            self.assertNotIn(b"Rowan Teague", raw)
+            self.assertNotIn(b"yeast respiration", raw)
 
     def audit_log(self, *argv):
         return json.loads(self.admin("audit", "--json", *argv))
@@ -408,9 +422,10 @@ class Viewer(unittest.TestCase):
         last = log[-1]
         self.assertEqual(last["action"], "graduate")
         self.assertRegex(last["detail"], r"student #1: .* \d+ access-log entries deleted")
-        raw = (self.data / "viewer.db").read_bytes()
-        self.assertNotIn(STUDENT.encode(), raw)
-        self.assertNotIn(PEOPLE["parent"].encode(), raw)
+        if not self.REMOTE:
+            raw = (self.data / "viewer.db").read_bytes()
+            self.assertNotIn(STUDENT.encode(), raw)
+            self.assertNotIn(PEOPLE["parent"].encode(), raw)
 
     def test_graduate_only_students(self):
         code, err = self.admin("graduate", PEOPLE["parent"], "--yes", ok=False)
@@ -423,6 +438,39 @@ class Viewer(unittest.TestCase):
             self.assertIn("default-src 'none'", r.headers["Content-Security-Policy"])
             self.assertEqual(r.headers["Cache-Control"], "no-store")
             self.assertEqual(r.headers["Referrer-Policy"], "no-referrer")
+
+
+class ViewerOnTurso(Viewer):
+    """Every viewer test again, with the database behind Turso's HTTP API (a fake)."""
+    REMOTE = True
+
+    def test_settings_come_from_the_database(self):
+        code, err = self.admin("init", "--env", "production", "--base-url", "https://x", ok=False)
+        self.assertEqual(code, 0, err)  # already set up: settings unchanged
+        self.assertIn("staging", self.admin("list"))
+
+    def test_vercel_entry_point_serves_from_turso(self):
+        import http.server
+        os.environ["TURSO_DATABASE_URL"] = self.fake.url
+        entry = load("vercel_entry", REPO / "api" / "index.py")
+        self.assertTrue(issubclass(entry.handler, http.server.BaseHTTPRequestHandler))
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), entry.handler)
+        threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            with urllib.request.urlopen(base + "/") as r:
+                self.assertIn("Test version", r.read().decode())
+            with urllib.request.urlopen(base + "/style.css") as r:
+                self.assertEqual(r.headers["Content-Type"], "text/css; charset=utf-8")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_bad_database_token_fails_clearly(self):
+        os.environ["TURSO_AUTH_TOKEN"] = "wrong"
+        code, err = self.admin("list", ok=False)
+        self.assertEqual(code, 1)
+        self.assertIn("401", err)
 
 
 class Markdown(unittest.TestCase):
