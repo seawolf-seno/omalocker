@@ -278,6 +278,99 @@ class Viewer(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("staging only", err)
 
+    def outbox(self):
+        db = vw.connect(self.target)
+        try:
+            return [dict(to=r["to_addr"], subject=r["subject"], body=r["body"])
+                    for r in db.execute("SELECT * FROM outbox ORDER BY id")]
+        finally:
+            db.close()
+
+    def ask_for_link(self, email):
+        anon = self.browser()
+        data = urllib.parse.urlencode({"email": email}).encode()
+        with anon.open(self.base + "/signin/email", data=data) as r:
+            return r.status, r.read().decode()
+
+    def test_parent_gets_a_link_by_email(self):
+        self.push()
+        status, body = self.get(self.browser(), "/")
+        self.assertIn("Email me a sign-in link", body)
+        status, body = self.ask_for_link(PEOPLE["parent"])
+        self.assertEqual(status, 200)
+        self.assertIn("Check your email", body)
+        [mail] = self.outbox()
+        self.assertEqual((mail["to"], mail["subject"]), (PEOPLE["parent"], "Your OmaLocker sign-in link"))
+        token = re.search(r"/signin\?t=([\w-]+)", mail["body"]).group(1)
+        self.assertNotIn("Rowan", mail["body"])   # no student details in email
+        parent = self.browser()
+        self.post(parent, "/signin", {"t": token}, expect=303)
+        self.assertEqual(self.get(parent, self.url("parent"))[0], 200)
+        self.assertIn("put a link", self.admin("sign-in-link", PEOPLE["biology"], "--send"))
+        self.assertIn(PEOPLE["biology"], self.admin("outbox"))
+
+    def test_link_requests_reveal_nothing_and_are_limited(self):
+        _, known = self.ask_for_link(PEOPLE["parent"])
+        _, unknown = self.ask_for_link("stranger@example.org")
+        _, student = self.ask_for_link(STUDENT)
+        strip = lambda b: re.sub(r"<strong>.*?</strong>", "", b)
+        self.assertEqual(strip(known), strip(unknown))
+        self.assertEqual(strip(known), strip(student))
+        self.assertEqual([m["to"] for m in self.outbox()], [PEOPLE["parent"]])
+        for _ in range(4):
+            self.ask_for_link(PEOPLE["parent"])
+        self.assertEqual(len(self.outbox()), vw.LINKS_PER_ADDRESS_PER_HOUR)
+        log = [e for e in self.audit_log() if e["action"] == "sign-in-email"]
+        self.assertEqual(sum(e["result"] == "ok" for e in log), 3)
+        self.assertIn("address limit", [e["detail"] for e in log])
+        self.assertNotIn("stranger@example.org", json.dumps(log))  # typos aren't kept
+        _, body = self.ask_for_link('<script>x</script>@example.org')
+        self.assertNotIn("<script>x", body)
+
+    def test_production_sends_through_resend(self):
+        import http.server
+        got = []
+
+        class Resend(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                got.append((self.headers.get("Authorization"),
+                            json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"id":"x"}')
+        fake = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Resend)
+        threading.Thread(target=fake.serve_forever, args=(0.05,), daemon=True).start()
+        try:
+            db = vw.connect(self.target)
+            try:
+                db.execute("UPDATE settings SET value = 'production' WHERE key = 'env'")
+            finally:
+                db.close()
+            self.server.RequestHandlerClass.viewer.cfg["env"] = "production"  # loaded at start
+            self.admin("person", "add", "--name", "Real-looking Parent",
+                       "--email", "jordan@fictional-school.org")
+            # Not set up yet: nothing is sent and nothing is kept.
+            self.ask_for_link("jordan@fictional-school.org")
+            self.assertEqual((got, self.outbox()), ([], []))
+            failed = [e for e in self.audit_log() if e["action"] == "sign-in-email"][-1]
+            self.assertIn("RESEND_API_KEY", failed["detail"])
+            os.environ.update(RESEND_API_KEY="re_test", OMALOCKER_MAIL_FROM="OmaLocker <l@fictional-school.org>",
+                              OMALOCKER_RESEND_URL=f"http://127.0.0.1:{fake.server_address[1]}/emails")
+            self.ask_for_link("jordan@fictional-school.org")
+        finally:
+            fake.shutdown()
+            fake.server_close()
+            for k in ("RESEND_API_KEY", "OMALOCKER_MAIL_FROM", "OMALOCKER_RESEND_URL"):
+                os.environ.pop(k, None)
+        [(auth, mail)] = got
+        self.assertEqual(auth, "Bearer re_test")
+        self.assertEqual(mail["to"], ["jordan@fictional-school.org"])
+        self.assertIn("/signin?t=", mail["text"])
+        self.assertEqual(self.outbox(), [])
+
     def test_sign_out_ends_the_session(self):
         self.push()
         parent = self.browser("parent")

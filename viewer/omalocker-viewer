@@ -11,7 +11,8 @@ the student before showing anything. See docs/viewer.md.
   omalocker-viewer grant parent|teacher|advisor|activity --person EMAIL --student EMAIL
                    [--scope CLASS_OR_ACTIVITY] [--primary-custody]
   omalocker-viewer revoke parent|teacher|advisor|activity --person EMAIL --student EMAIL [--scope X]
-  omalocker-viewer sign-in-link EMAIL
+  omalocker-viewer sign-in-link EMAIL [--send | --hours N]
+  omalocker-viewer outbox
   omalocker-viewer push-token STUDENT_EMAIL
   omalocker-viewer graduate STUDENT_EMAIL [--yes]
   omalocker-viewer audit [--student E] [--person E] [--since DATE] [--denied]
@@ -45,6 +46,9 @@ TEST_DOMAIN = re.compile(r"(^|\.)(example|test|invalid|example\.(com|org|net))$"
 
 SIGN_IN_TTL = 15 * 60
 MAX_DEMO_HOURS = 72
+LINKS_PER_ADDRESS_PER_HOUR = 3
+LINKS_PER_HOUR = 200  # the whole site: the form can't be used to flood inboxes
+RESEND_URL = "https://api.resend.com/emails"
 SESSION_TTL = 30 * 24 * 3600
 MAX_PUSH = 32 * 1024 * 1024
 MAX_NOTE = 1024 * 1024
@@ -110,6 +114,14 @@ CREATE TABLE IF NOT EXISTS notes (
 );
 -- Who opened what, and every change. No foreign keys: entries outlive the rows they
 -- mention, except at graduation (docs/viewer.md, "Access log").
+-- Mail that wasn't sent for real: staging, test addresses, or no mail service set up.
+CREATE TABLE IF NOT EXISTS outbox (
+  id INTEGER PRIMARY KEY,
+  at REAL NOT NULL,
+  to_addr TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  body TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY,
   at REAL NOT NULL,
@@ -701,9 +713,22 @@ blockquote{border-left:3px solid var(--line);margin:1rem 0;padding-left:1rem;col
 article{overflow-wrap:anywhere}
 button{font:inherit;padding:.45rem 1rem;border:1px solid var(--line);background:var(--card);
   color:var(--fg);border-radius:8px;cursor:pointer}
+label{display:block;font-weight:600;margin-top:1rem}
+input[type=email]{display:block;width:100%;font:inherit;font-size:1.1rem;padding:.75rem;
+  margin-top:.35rem;border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--fg)}
 button.big{display:block;width:100%;padding:.9rem;font-size:1.1rem;font-weight:600;
   background:var(--accent);color:var(--bg);border:none;border-radius:12px;margin-top:1rem}
 """
+
+EMAIL_FORM_BODY = (
+    '<form method="post" action="/signin/email">'
+    '<label for="email">Your email address</label>'
+    '<input id="email" name="email" type="email" autocomplete="email" inputmode="email" '
+    'required placeholder="you@example.com">'
+    '<button class="big">Email me a sign-in link</button></form>')
+EMAIL_FORM = ("<h1>OmaLocker</h1><p>See how your student is doing. Enter the email address "
+              "the school has for you and we'll send a link. No password needed.</p>"
+              + EMAIL_FORM_BODY)
 
 AUDIENCE_LABEL = {"parent": "Family view", "advisor": "Advisor view",
                   "teacher": "Teacher view", "activity": "Activity view"}
@@ -815,6 +840,81 @@ def page(cfg, title, body, person=None):
             f'<link rel="stylesheet" href="/style.css"></head><body>{staging}'
             f'<header class="top"><a class="brand" href="/">OmaLocker</a>{who}</header>'
             f'<main>{body}</main></body></html>')
+
+
+# ---------------------------------------------------------------- mail
+
+def is_test_address(email):
+    return bool(TEST_DOMAIN.search(email.rsplit("@", 1)[-1].lower()))
+
+
+def send_mail(cfg, db, to, subject, text):
+    """Send through Resend, or keep it in the outbox: always on staging and for test
+    addresses, so fictional people never get real mail. Returns 'sent' or 'outbox'."""
+    key = os.environ.get("RESEND_API_KEY")
+    sender = os.environ.get("OMALOCKER_MAIL_FROM")
+    if cfg["env"] == "staging" or is_test_address(to) or not key:
+        if cfg["env"] == "production" and not is_test_address(to):
+            raise ViewerError("production can't send mail: set RESEND_API_KEY and OMALOCKER_MAIL_FROM")
+        db.execute("INSERT INTO outbox (at, to_addr, subject, body) VALUES (?, ?, ?, ?)",
+                   (clock(), to, subject, text))
+        return "outbox"
+    if not sender:
+        raise ViewerError("set OMALOCKER_MAIL_FROM (a verified sender, like OmaLocker <locker@school.org>)")
+    import urllib.request
+    req = urllib.request.Request(
+        os.environ.get("OMALOCKER_RESEND_URL") or RESEND_URL, method="POST",
+        data=json.dumps({"from": sender, "to": [to], "subject": subject, "text": text}).encode(),
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                 "User-Agent": f"omalocker-viewer/{VERSION}"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        with e:
+            raise ViewerError(f"mail service said {e.code}")
+    except urllib.error.URLError as e:
+        raise ViewerError(f"can't reach the mail service: {e.reason}")
+    return "sent"
+
+
+def new_sign_in_link(cfg, db, person, ttl=SIGN_IN_TTL):
+    token = secrets.token_urlsafe(32)
+    db.execute("INSERT INTO sign_in VALUES (?, ?, ?)",
+               (digest(token), person["id"], clock() + ttl))
+    return f"{cfg['base_url']}/signin?t={token}"
+
+
+def mail_sign_in_link(cfg, db, person):
+    link = new_sign_in_link(cfg, db, person)
+    text = (f"Hi {person['name']},\n\n"
+            f"Tap this link to open OmaLocker:\n\n{link}\n\n"
+            "It works once, for the next 15 minutes. After that your phone stays signed in "
+            "for 30 days.\n\nIf you didn't ask for this, you can ignore this email.\n")
+    return send_mail(cfg, db, person["email"], "Your OmaLocker sign-in link", text)
+
+
+def request_link(cfg, db, email):
+    """Someone typed their address on the sign-in page. Mails a link if the address
+    belongs to a person who isn't a student and limits allow. Returns what happened,
+    for the access log only; the page always says the same thing."""
+    email = (email or "").strip()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email) or len(email) > 254:
+        return "not an address"
+    hour_ago = clock() - 3600
+    recent = db.execute("SELECT COUNT(*) FROM audit WHERE action = 'sign-in-email' "
+                        "AND result = 'ok' AND at > ?", (hour_ago,)).fetchone()[0]
+    if recent >= LINKS_PER_HOUR:
+        return "site limit"
+    person = db.execute("SELECT * FROM people WHERE email = ?", (email,)).fetchone()
+    if not person or person["is_student"]:
+        return "unknown"
+    mine = db.execute("SELECT COUNT(*) FROM audit WHERE action = 'sign-in-email' AND "
+                      "result = 'ok' AND actor_id = ? AND at > ?",
+                      (person["id"], hour_ago)).fetchone()[0]
+    if mine >= LINKS_PER_ADDRESS_PER_HOUR:
+        return "address limit"
+    return mail_sign_in_link(cfg, db, person) and "ok"
 
 
 class Viewer:
@@ -1079,9 +1179,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         person = v.session_person(self.headers.get("Cookie"))
         if url.path == "/":
             if not person:
-                body = ("<h1>OmaLocker</h1><p>Open the sign-in link the school emailed you. "
-                        "Need a new one? Ask the school office.</p>")
-                return self.send(200, page(v.cfg, "Sign in", body))
+                return self.send(200, page(v.cfg, "Sign in", EMAIL_FORM))
             views = allowed_views(v.db, person)
             if len(views) == 1:  # one child, one view: go straight there
                 s, audience, scope = views[0]
@@ -1145,13 +1243,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not signed:
                 audit(v.db, "unknown", "sign-in", result="denied",
                       detail="used, expired or unknown link")
-                body = ("<h1>That link has expired</h1><p>Sign-in links work once, for 15 "
-                        "minutes. Ask the school office for a new one.</p>")
+                body = ("<h1>That link has expired</h1><p>Sign-in links work once. "
+                        "Get a new one:</p>" + EMAIL_FORM_BODY)
                 return self.send(400, page(v.cfg, "Sign in", body))
             session, person_id = signed
             who = v.db.execute("SELECT * FROM people WHERE id = ?", (person_id,)).fetchone()
             audit(v.db, who, "sign-in")
             return self.redirect("/", [self.cookie(session, SESSION_TTL)])
+        if path == "/signin/email":
+            email = (form.get("email") or [""])[0].strip()
+            try:
+                what = request_link(v.cfg, v.db, email)
+            except ViewerError as e:
+                what = f"failed: {e}"
+            who = v.db.execute("SELECT * FROM people WHERE email = ?", (email,)).fetchone() \
+                if what in ("ok", "address limit") else None
+            audit(v.db, who or "unknown", "sign-in-email",
+                  result="ok" if what == "ok" else "denied",
+                  detail="" if what == "ok" else what)
+            body = ("<h1>Check your email</h1>"
+                    f"<p>If <strong>{esc(email)}</strong> is on file with the school, a sign-in "
+                    "link is on its way. It works once, for 15 minutes.</p>"
+                    '<p class="muted">Nothing after a few minutes? Check spam, or ask the '
+                    "school office which address they have for you.</p>"
+                    '<p><a href="/">Try another address</a></p>')
+            return self.send(200, page(v.cfg, "Check your email", body))
         if path == "/signout":
             who = v.session_person(self.headers.get("Cookie"))
             if who:
@@ -1269,12 +1385,19 @@ def cmd_sign_in_link(args):
         if not 0 < args.hours <= MAX_DEMO_HOURS:
             raise ViewerError(f"--hours must be between 1 and {MAX_DEMO_HOURS}")
         ttl = args.hours * 3600
-    token = secrets.token_urlsafe(32)
-    db.execute("INSERT INTO sign_in VALUES (?, ?, ?)",
-               (digest(token), person["id"], clock() + ttl))
+    if args.send:
+        if args.hours:
+            raise ViewerError("--send mails a normal 15-minute link; --hours is for printing")
+        how = mail_sign_in_link(cfg, db, person)
+        audit(db, cli_actor(), "sign-in-link", detail=person["email"] + f" {how}")
+        print(f"emailed a link to {person['email']}" if how == "sent"
+              else f"put a link for {person['email']} in the outbox (no real mail: "
+                   "`omalocker-viewer outbox`)")
+        return 0
+    link = new_sign_in_link(cfg, db, person, ttl)
     audit(db, cli_actor(), "sign-in-link", detail=person["email"]
           + (f" valid {args.hours}h" if args.hours else ""))
-    print(f"{cfg['base_url']}/signin?t={token}")
+    print(link)
     if args.hours:
         print(f"Works once, for {args.hours} hours. Whoever taps its button first is signed "
               "in, so don't open it yourself.", file=sys.stderr)
@@ -1414,6 +1537,18 @@ def cmd_audit(args):
     return 0
 
 
+def cmd_outbox(args):
+    cfg, db = open_admin(args)
+    import datetime
+    rows = db.execute("SELECT * FROM outbox ORDER BY id DESC LIMIT ?", (args.limit,)).fetchall()
+    for r in rows[::-1]:
+        when = datetime.datetime.fromtimestamp(r["at"]).astimezone().isoformat(timespec="seconds")
+        print(f"--- {when}  to {r['to_addr']}  {r['subject']}\n{r['body']}")
+    if not rows:
+        print("outbox is empty")
+    return 0
+
+
 def cmd_list(args):
     cfg, db = open_admin(args)
     print(f"{cfg['env']} viewer at {cfg['base_url']}")
@@ -1478,6 +1613,7 @@ def main(argv=None):
 
     p = sub.add_parser("sign-in-link", help="print a one-time sign-in link")
     p.add_argument("email")
+    p.add_argument("--send", action="store_true", help="email it instead of printing it")
     p.add_argument("--hours", type=int,
                    help=f"staging only: keep the link valid this long (1-{MAX_DEMO_HOURS}), "
                         "to send a demo by email")
@@ -1491,6 +1627,10 @@ def main(argv=None):
     p.add_argument("email")
     p.add_argument("--yes", action="store_true", help="delete (without it: only list)")
     p.set_defaults(func=cmd_graduate)
+
+    p = sub.add_parser("outbox", help="mail kept instead of sent (staging, test addresses)")
+    p.add_argument("--limit", type=int, default=10)
+    p.set_defaults(func=cmd_outbox)
 
     p = sub.add_parser("audit", help="access log: who opened what, and every change")
     p.add_argument("--student", help="entries about this student (email)")

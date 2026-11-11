@@ -56,6 +56,10 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
   through `tests/fake_turso.py`. Vercel CLI/plugin/MCP set up (account srsuchard).
 - 2026-11-10: staging live: https://omalocker-viewer.vercel.app (Turso via Vercel Marketplace;
   fictional people; sign-in, role checks, push, audit verified live). Gotchas in docs/viewer.md.
+- 2026-11-10: sign-in by email: form on the sign-in page, same reply for any address, 3/hour
+  per address, 200/hour site; Resend API (stdlib); staging and test addresses go to the
+  `outbox` table instead (`omalocker-viewer outbox`). Live on staging. Real sending needs
+  Resend + verified school domain + DPA.
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
   `docs/plan.md` (backup key, where the viewer runs, parent sign-in, custody records);

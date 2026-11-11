@@ -64,7 +64,7 @@ Things Vercel needs that aren't obvious:
 - **Deleted data:** locally, graduation overwrites deleted rows (`secure_delete`, `VACUUM`).
   Turso keeps point-in-time backups, so deleted rows stay in its backups until they age out;
   check Turso's retention with IT before real data.
-- **Still to do:** a mail service for sign-in links (for example Resend); data processing
+- **Still to do:** Resend for real sending (code ready, see "Signing in by email"); data processing
   agreements with Vercel, Turso and the mail service before any real student data.
 
 ### Set up staging
@@ -77,6 +77,23 @@ omalocker-viewer --db libsql://<db>.turso.io init --env staging --base-url https
 vercel deploy
 # 3. Fictional people, grants and a push token, as below, with --db instead of --data
 ```
+
+## Signing in by email
+
+The sign-in page asks for an email address and mails a one-time link (15 minutes). The page
+says the same thing whatever was typed, so it never tells anyone who's on file. Students get
+no link (they have their Locker). Limits: 3 links per address per hour, 200 for the whole
+site. Every request is in the access log; an address that isn't on file isn't stored.
+
+Mail goes out through [Resend](https://resend.com) (`RESEND_API_KEY`, and
+`OMALOCKER_MAIL_FROM`, a sender on a domain verified in Resend). It is **never** really sent
+on staging or to a test address: those go to the `outbox` table, read with
+`omalocker-viewer outbox`. Production without Resend set up sends nothing and logs why.
+`omalocker-viewer sign-in-link EMAIL --send` mails a link from the admin CLI.
+
+To send for real: add Resend from Vercel's Marketplace (`resend/resend-email`), verify the
+school's sending domain in Resend (DNS records from IT), set `OMALOCKER_MAIL_FROM`, and sign
+a data processing agreement with Resend first: the emails carry parents' addresses.
 
 ## Who sees what
 
