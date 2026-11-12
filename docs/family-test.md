@@ -44,6 +44,10 @@ In a second terminal, Caddy (it makes its own CA and a certificate for the IP):
 
 ```sh
 caddy run --adapter caddyfile --config - <<EOF
+{
+    auto_https disable_redirects   # no port 80 (needs root)
+    skip_install_trust             # don't add the CA to this laptop's trust store
+}
 https://$IP:8443 {
     tls internal
     reverse_proxy 127.0.0.1:8380
