@@ -877,7 +877,7 @@ class InstallScriptTest(unittest.TestCase):
                    "OMALOCKER_NO_TIMER": "1"}
 
             def run(*args):
-                return subprocess.run(["bash", str(REPO / "install.sh"), *args], env=env,
+                return subprocess.run(["bash", str(REPO / "install.sh"), "--no-package", *args], env=env,
                                       capture_output=True, text=True)
             r = run()
             self.assertEqual(r.returncode, 0, r.stderr)
@@ -892,6 +892,39 @@ class InstallScriptTest(unittest.TestCase):
             r = run("--viewer", "http://viewer.example")
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("https://", r.stderr)
+        finally:
+            shutil.rmtree(home)
+
+    @unittest.skipUnless(shutil.which("makepkg"), "needs makepkg (Arch/Omarchy)")
+    def test_omarchy_builds_the_package_and_adds_vault_and_launcher(self):
+        import subprocess
+        home = Path(tempfile.mkdtemp())
+        try:
+            log = home / "pacman.log"
+            stub = home / "pacman"
+            stub.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\n')
+            stub.chmod(0o755)
+            obsidian = home / ".config/obsidian/obsidian.json"
+            obsidian.parent.mkdir(parents=True)
+            obsidian.write_text('{"vaults":{"aaaa":{"path":"/elsewhere","ts":1}}}')
+            env = {"HOME": str(home), "PATH": os.environ["PATH"], "OMALOCKER_SRC": str(REPO),
+                   "OMALOCKER_NO_TIMER": "1", "OMALOCKER_OMARCHY": "1",
+                   "OMALOCKER_PACMAN": str(stub), "OMALOCKER_BIN": str(REPO / "bin" / "omalocker")}
+            for _ in range(2):             # a rerun adds nothing twice
+                r = subprocess.run(["bash", str(REPO / "install.sh")], env=env,
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+            calls = log.read_text().splitlines()
+            self.assertIn("-S --needed --noconfirm base-devel python restic obsidian", calls[0])
+            self.assertRegex(calls[1], r"^-U --noconfirm .*/omalocker-[0-9][^/]*\.pkg\.tar\.")
+            self.assertNotIn("viewer", calls[1])
+            self.assertFalse((home / ".local/bin/omalocker").exists())
+            vaults = json.loads(obsidian.read_text())["vaults"]
+            paths = sorted(v["path"] for v in vaults.values())
+            self.assertEqual(paths, sorted(["/elsewhere", str((home / "Locker").resolve())]))
+            desktop = (home / ".local/share/applications/omalocker.desktop").read_text()
+            self.assertIn("Name=Locker", desktop)
+            self.assertIn("obsidian://open?path=%2F", desktop)
         finally:
             shutil.rmtree(home)
 

@@ -64,7 +64,7 @@ Mr. Eno's classes. If not, skip both; the levels steps below won't apply.
 
 ## 2. The child's laptop: the Locker
 
-Linux or macOS, Python 3.11 or newer, no root needed. Have the child's push token and
+Omarchy (or any Linux or macOS with Python 3.11+). Have the child's push token and
 `~/viewer-ca.crt` (from Samuel's laptop) ready to paste; then on the child's laptop:
 
 ```sh
@@ -72,9 +72,12 @@ curl -fsSL https://raw.githubusercontent.com/seawolf-seno/omalocker/main/install
     | bash -s -- --viewer https://<Samuel's IP>:8443
 ```
 
-It installs `omalocker` in `~/.local`, creates `~/Locker` (never overwrites), asks for the
+On Omarchy it asks for the child's password once (pacman), installs Obsidian and restic,
+builds and installs the `omalocker` package (the one school laptops get), and puts "Locker"
+in the app launcher (Super + Space). Elsewhere it installs into `~/.local` without root.
+Then it creates `~/Locker` (never overwrites) and adds it as an Obsidian vault, asks for the
 token (hidden) and the certificate (pasted), writes `~/.config/omalocker/viewer.toml` with
-`ca_file`, turns on the hourly sync where systemd runs, and pushes once.
+`ca_file`, turns on the hourly sync, and pushes once.
 
 Then the child opens `~/Locker` in Obsidian and writes a few real notes: a class note, a
 piece of work, a milestone, and one note with `share: [private]`.

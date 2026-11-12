@@ -101,7 +101,9 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
   - Tested: restic with delete refused works (backups, restore OK; forget refused).
   - Blackbaud "parental access" is not custody.
   - Answers drafted in https://claude.ai/artifact/FMKFaXK2vKsAhhiDNtfV7i
-- 2026-11-12: `install.sh` = the curl | bash install link (no root; ~/.local, init, optional
+- 2026-11-12: `install.sh` = the curl | bash install link. Omarchy: pacman (obsidian, restic),
+  builds + installs the package, Obsidian vault + "Locker" launcher entry. Else ~/.local, no
+  root. Tests stub pacman (OMALOCKER_PACMAN/BIN/OMARCHY); never run it with real XDG_* set. Optional
   `--viewer` with token + pasted CA, hourly user timer). Tested against a local https viewer.
 - 2026-11-12: family test planned (`docs/family-test.md`): Mr. Eno's child as the student,
   Mr. Eno as parent/teacher (his permission). No cloud: production viewer on Samuel's laptop
