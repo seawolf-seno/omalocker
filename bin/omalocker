@@ -1492,7 +1492,7 @@ def cmd_views(args):
 
 
 def viewer_config():
-    """{url, token_file} for pushing views, or None when not set up."""
+    """{url, token_file[, ca_file]} for pushing views, or None when not set up."""
     if os.environ.get("OMALOCKER_VIEWER_CONFIG"):
         paths = [Path(os.environ["OMALOCKER_VIEWER_CONFIG"])]
     else:
@@ -1521,13 +1521,19 @@ def viewer_call(cfg, path, payload=None):
     if parts.scheme != "https" and parts.hostname not in ("localhost", "127.0.0.1", "::1"):
         raise ViewError("the viewer url must be https:// (student data never goes out unencrypted)")
     token = Path(str(cfg["token_file"])).expanduser().read_text().strip()
+    context = None
+    if cfg.get("ca_file"):
+        # A viewer with its own certificate authority (a local test viewer behind Caddy's
+        # `tls internal`): trust that CA for this connection only, nothing system-wide.
+        import ssl
+        context = ssl.create_default_context(cafile=str(Path(str(cfg["ca_file"])).expanduser()))
     body = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(base + path, data=body,
                                  method="POST" if body is not None else "GET",
                                  headers={"Authorization": f"Bearer {token}",
                                           "Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=60, context=context) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         try:

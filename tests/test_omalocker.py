@@ -810,5 +810,61 @@ class Views(Env):
         self.assertIn("outside the Locker", err)
 
 
+@unittest.skipUnless(shutil.which("openssl"), "needs openssl")
+class ViewerCaFileTest(unittest.TestCase):
+    """A viewer with its own CA (local test viewer behind Caddy's `tls internal`)."""
+
+    def setUp(self):
+        import http.server
+        import ssl
+        import subprocess
+        import threading
+        self.tmp = Path(tempfile.mkdtemp())
+        t = self.tmp
+
+        def ssl_run(*args):
+            subprocess.run(["openssl", *args], check=True, capture_output=True, cwd=t)
+        ssl_run("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=Test CA",
+                "-addext", "basicConstraints=critical,CA:TRUE",
+                "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+                "-keyout", "ca.key", "-out", "ca.pem")
+        ssl_run("req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost",
+                "-keyout", "srv.key", "-out", "srv.csr")
+        (t / "ext").write_text("subjectAltName=DNS:localhost\n")
+        ssl_run("x509", "-req", "-in", "srv.csr", "-CA", "ca.pem", "-CAkey", "ca.key",
+                "-CAcreateserial", "-days", "1", "-extfile", "ext", "-out", "srv.pem")
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps({"auth": self.headers.get("Authorization")}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(t / "srv.pem", t / "srv.key")
+        self.server.socket = ctx.wrap_socket(self.server.socket, server_side=True)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        (t / "key").write_text("tok\n")
+        self.cfg = {"url": f"https://localhost:{self.server.server_port}", "token_file": str(t / "key")}
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        shutil.rmtree(self.tmp)
+
+    def test_ca_file_trusts_only_that_viewer(self):
+        with self.assertRaises(om.ViewError):        # unknown CA: refused
+            om.viewer_call(self.cfg, "/api/me")
+        cfg = {**self.cfg, "ca_file": str(self.tmp / "ca.pem")}
+        self.assertEqual(om.viewer_call(cfg, "/api/me"), {"auth": "Bearer tok"})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -101,6 +101,10 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
   - Tested: restic with delete refused works (backups, restore OK; forget refused).
   - Blackbaud "parental access" is not custody.
   - Answers drafted in https://claude.ai/artifact/FMKFaXK2vKsAhhiDNtfV7i
+- 2026-11-12: family test planned (`docs/family-test.md`): Mr. Eno's child as the student,
+  Mr. Eno as parent/teacher (his permission). No cloud: production viewer on Samuel's laptop
+  (local SQLite outside the repo) behind Caddy `tls internal`; viewer.toml `ca_file` trusts
+  that CA for the push only. Agents never open the child's Locker, views or viewer data.
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
   `docs/plan.md` (backup key, where the viewer runs, parent sign-in, custody records);

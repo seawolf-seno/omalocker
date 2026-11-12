@@ -220,6 +220,10 @@ url = "https://locker-staging.school.example"
 token_file = "/etc/omalocker/viewer-key"   # the push token, readable by the student only
 ```
 
+A viewer with its own certificate authority (a local test viewer behind Caddy's
+`tls internal`, as in `docs/family-test.md`) also needs `ca_file = "<path to its root.crt>"`;
+that CA is trusted for the viewer only, not system-wide.
+
 Then `omalocker push` builds the views and sends them; every push replaces all of that
 student's views. `omalocker push` only sends over `https://` (or to this machine).
 
