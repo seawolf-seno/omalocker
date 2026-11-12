@@ -866,5 +866,35 @@ class ViewerCaFileTest(unittest.TestCase):
         self.assertEqual(om.viewer_call(cfg, "/api/me"), {"auth": "Bearer tok"})
 
 
+class InstallScriptTest(unittest.TestCase):
+    """install.sh (the curl | bash link): Locker + command in a home, never overwrites."""
+
+    def test_installs_into_home_and_reruns_safely(self):
+        import subprocess
+        home = Path(tempfile.mkdtemp())
+        try:
+            env = {"HOME": str(home), "PATH": os.environ["PATH"], "OMALOCKER_SRC": str(REPO),
+                   "OMALOCKER_NO_TIMER": "1"}
+
+            def run(*args):
+                return subprocess.run(["bash", str(REPO / "install.sh"), *args], env=env,
+                                      capture_output=True, text=True)
+            r = run()
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue((home / ".local/bin/omalocker").exists())
+            me = home / "Locker" / "Me.md"
+            self.assertIn("role: student", me.read_text())
+            me.write_text(me.read_text() + "\nmine\n")
+            r = run()
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("nothing overwritten", r.stdout)
+            self.assertTrue(me.read_text().endswith("mine\n"))
+            r = run("--viewer", "http://viewer.example")
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("https://", r.stderr)
+        finally:
+            shutil.rmtree(home)
+
+
 if __name__ == "__main__":
     unittest.main()

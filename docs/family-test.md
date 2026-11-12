@@ -64,20 +64,17 @@ Mr. Eno's classes. If not, skip both; the levels steps below won't apply.
 
 ## 2. The child's laptop: the Locker
 
-On pacos or Arch: install `build/omalocker-*.pkg.tar.*` (`make package` first). Elsewhere:
-clone the repo and use `python3 bin/omalocker`.
+Linux or macOS, Python 3.11 or newer, no root needed. Have the child's push token and
+`~/viewer-ca.crt` (from Samuel's laptop) ready to paste; then on the child's laptop:
 
 ```sh
-omalocker init --role student
-mkdir -p ~/.config/omalocker
-cp <usb>/root.crt ~/.config/omalocker/viewer-ca.crt
-printf '%s\n' '<child push token>' > ~/.config/omalocker/viewer-key && chmod 600 ~/.config/omalocker/viewer-key
-cat > ~/.config/omalocker/viewer.toml <<EOF
-url = "https://<Samuel's IP>:8443"
-token_file = "~/.config/omalocker/viewer-key"
-ca_file = "~/.config/omalocker/viewer-ca.crt"
-EOF
+curl -fsSL https://raw.githubusercontent.com/seawolf-seno/omalocker/main/install.sh \
+    | bash -s -- --viewer https://<Samuel's IP>:8443
 ```
+
+It installs `omalocker` in `~/.local`, creates `~/Locker` (never overwrites), asks for the
+token (hidden) and the certificate (pasted), writes `~/.config/omalocker/viewer.toml` with
+`ca_file`, turns on the hourly sync where systemd runs, and pushes once.
 
 Then the child opens `~/Locker` in Obsidian and writes a few real notes: a class note, a
 piece of work, a milestone, and one note with `share: [private]`.
