@@ -184,7 +184,51 @@ FERPA check.
 
 Asked school IT by email (2026-11-10): a sending subdomain and DNS records for sign-in
 emails, who signs data agreements (Resend, Vercel, Turso), backup storage, and decision 2
-(backup key per person or per school). Waiting for an answer.
+(backup key per person or per school).
+
+**Answer (Mr. Mulligan, Director of Technology, 2026-11-11):** likes the idea; wants it held
+to enterprise IT security, since it may tie into the wider pacos rollout and IT will own it
+after Samuel graduates. Rather than signing new data agreements (Turso and Resend have none
+written for K-12), he asks how OmaLocker could use what the school already has:
+- **Family records:** Blackbaud SKY API as the single source of truth for parent-student
+  relationships, instead of family records in the viewer (decision 5).
+- **Sign-in:** send sign-in links through the school's Google Workspace (Education Plus), and
+  use Google SSO for student sign-in (decisions 4, 10).
+- **Backups:** how a remote student's laptop reaches an on-campus server; what 350 laptops
+  backing up at 8:00 AM do to the network; whether Google Cloud Storage (or, at no extra
+  cost, a Shared Drive) can replace the server and still be append-only.
+- **Operations:** delete backups automatically when a student moves to a graduated
+  Organizational Unit (OU), instead of the manual steps in `docs/graduation.md`; and the exact
+  Helpdesk steps to find one student's key among 350+ after a lost laptop (decision 2).
+
+He wants to meet with Samuel and seno the week of 2026-11-16. Samuel's answers are drafted in
+[OmaLocker: adapting to Pacifica's enterprise requirements](https://claude.ai/artifact/FMKFaXK2vKsAhhiDNtfV7i).
+In short:
+- **Hosting:** Blackbaud for relationships, Gmail API and Google SSO, the viewer on Cloud Run
+  in an IT-owned project, backups in a Cloud Storage bucket.
+- **Credentials:** laptops get short-lived per-student storage tokens through the student's
+  Google sign-in; no stored storage keys.
+- **Graduation:** a nightly job deletes graduates' data after a grace period in the
+  graduated OU.
+- **Lost laptop:** keys are stored against the student's Google account, so the student's own
+  sign-in restores their Locker.
+This reopens decisions 9–10 (Vercel, Resend).
+
+Checked so far (2026-11-11):
+- **Blackbaud:** "parental access" is not custody. It can be given to 10 relationship types,
+  including grandparent and consultant. Decision 5 needs a custody field.
+- **Backups without delete:** restic 0.19.1 through a proxy that refuses every delete (a
+  stand-in for a no-delete Cloud Storage token).
+  - 3 of 3 backups OK; each only warns it can't remove its lock file.
+  - The laptop can't remove snapshots (`forget` is refused).
+  - A restore into an empty folder is identical to the original.
+  - IT-side `unlock` + `forget --prune` + `check` is clean.
+  - Still to test on a real bucket.
+- **Sizes (synthetic Locker: 2,000 notes, 50 photos, about 20 MB):**
+  - First backup: 16 MB.
+  - Every 2 days: 0.42 MB, or 0.12 MB with text only.
+  - All 350 students at 8:00 AM: about 147 MB.
+  - Real Lockers still to measure.
 
 1. **Obsidian for students under 18.** Checked 2026-11-10 (terms, license and privacy
    policy all last updated 2025 or earlier):

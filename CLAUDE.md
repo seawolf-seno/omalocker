@@ -94,6 +94,13 @@ the school dev platform initiative (see `~/.claude/CLAUDE.md`). Siblings: `../om
   handouts meets the age line; the school keeps the record; opt-out students use another
   editor on the same files. Open (seno): consent vs opt-out, where the record lives, and
   whether to keep [[wikilinks]] (Obsidian suggests standard links for opt-out classes).
+- 2026-11-11: IT director (Mr. Mulligan) answered the IT email (plan "Decisions still open"):
+  use Blackbaud SKY API, Google Workspace mail/SSO and Google storage instead of Turso,
+  Resend and an on-campus server; automate graduation by OU; Helpdesk key recovery.
+  Reopens decisions 9–10. Meeting with him and seno the week of 2026-11-16.
+  - Tested: restic with delete refused works (backups, restore OK; forget refused).
+  - Blackbaud "parental access" is not custody.
+  - Answers drafted in https://claude.ai/artifact/FMKFaXK2vKsAhhiDNtfV7i
 - Scope (seno, 2026-11-10): work only in this repo; don't change sibling repos.
 - Next: seno opens `fixtures/sample-locker` in Obsidian (Phase 0); open decisions in
   `docs/plan.md` (backup key, where the viewer runs, parent sign-in, custody records);
